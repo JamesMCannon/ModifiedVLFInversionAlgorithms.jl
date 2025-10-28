@@ -56,13 +56,6 @@ function nlopt_setup(scenario)
 end
 
 function test_nlopt(scenario)
-    if Sys.iswindows() && isfile("C:\\LWPCv21\\lwpm.exe")
-        @info "    Running NLopt with LWPC. This may take a while."
-    else
-        @warn "    `test_nlopt()` only runs on Windows with LWPC"
-        return
-    end
-
     @unpack pathstep, dt, modelproj = scenario()
     paths, x, y, lengthscale = nlopt_setup(scenario)
 

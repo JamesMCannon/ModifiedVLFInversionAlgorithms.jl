@@ -57,8 +57,8 @@ end
 
 """
     objective(itp, x, y, paths, dt;
-        ρ=l2norm, ϕ=(x)->0, σamp=0.1, σphase=deg2rad(1.0), lwpc=true, pathstep=100e3,
-        numexe=16, datatypes::Tuple=(:amp, :phase))
+        ρ=l2norm, ϕ=(x)->0, σamp=0.1, σphase=deg2rad(1.0), pathstep=100e3,
+        datatypes::Tuple=(:amp, :phase))
 
 Compute the objective (cost) function given states `x` and observed amplitude and phase in
 `y` for the penalty function `ρ(r)` defaulting to the L2-norm on the residuals and an
@@ -70,10 +70,10 @@ The residuals passed to `ρ` are scaled by `σamp` and `σphase`.
 used to compute the data error. Even if only one of them is specified.
 """
 function objective(itp, x, y, paths, dt;
-    ρ=l2norm, ϕ=(x)->0, σamp=0.1, σphase=deg2rad(1.0), lwpc=true, pathstep=100e3, numexe=16,
+    ρ=l2norm, ϕ=(x)->0, σamp=0.1, σphase=deg2rad(1.0), pathstep=100e3, 
     datatypes::Tuple=(:amp, :phase))
 
-    ma, mp = model(itp, x, paths, dt; lwpc, pathstep, numexe)
+    ma, mp = model(itp, x, paths, dt; pathstep)
     
     if :amp in datatypes && :phase in datatypes
         amp_resids = (y(:amp) .- ma)./σamp

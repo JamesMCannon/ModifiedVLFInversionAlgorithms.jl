@@ -58,7 +58,7 @@ end
 
 function dayscenario()
     ens_size = 30  # size of the ensemble... the number of ionospheres
-    ntimes = 2  # how many time steps to take
+    ntimes = 1  # how many time steps to take
 
     # The DateTime will be needed for the prior ionosphere and possibly the IGRF magnetic field
     dt = DateTime(2020, 3, 1, 20, 00)  # day

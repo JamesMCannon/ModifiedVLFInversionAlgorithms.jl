@@ -86,12 +86,6 @@ function letkf_setup(scenario)
 end
 
 function test_letkf(scenario)
-    if Sys.iswindows() && isfile("C:\\LWPCv21\\lwpm.exe")
-        @info "    Running LETKF with LWPC. This may take a while (10+ mins)."
-    else
-        @warn "    `test_letkf()` only runs on Windows with LWPC"
-        return
-    end
 
     @unpack pathstep, dt = scenario()
     paths, x, y, R, localization = letkf_setup(scenario)

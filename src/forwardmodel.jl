@@ -162,7 +162,7 @@ function model_observation(hbfcn, tx, rx, datetime; pathstep=100e3)
 end
 
 """
-    model(itp, x, paths, datetime; pathstep=100e3, lwpc=true, numexe=16, sleeptime=0.1)
+    model(itp, x, paths, datetime; pathstep=100e3)
 
 Return the model observations `(amps, phases)` for spatial interpolation method `itp` and
 `datetime`.
@@ -170,11 +170,10 @@ Return the model observations `(amps, phases)` for spatial interpolation method 
 If `x` is a `KeyedArray`, then it is transformed to a vector where the first half is ``h′``
 and the second half is ``β``.
 
-Uses LWPC as the forward model if `lwpc` is true; otherwise, uses LongwaveModePropagator.jl.
-`numexe` specifies the number of LWPC executables to use.
+Uses LongwaveModePropagator.jl as the forward model.
 """
 function model(itp::GeoStatsInterpolant, x, paths, datetime;
-    pathstep=100e3, lwpc=true, numexe=16, sleeptime=0.1)
+    pathstep=100e3)
 
     npts = length(x) ÷ 2
     hprimes = x[1:npts]
@@ -194,12 +193,9 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
         batch.inputs[i] = input
     end
 
-    if lwpc
-        computejob = LocalParallel("estimate", ".", "C:\\LWPCv21\\lwpm.exe", numexe, 90)
-        output = LWPC.run(batch, computejob; savefile=false, sleeptime=sleeptime)
-    else
-        output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
-    end
+   
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
+    
 
     amps = Vector{Float64}(undef, length(paths))
     phases = similar(amps)
@@ -218,11 +214,11 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
 
     return amps, phases
 end
-model(itp::GeoStatsInterpolant, x::KeyedArray, paths, datetime; pathstep=100e3, lwpc=true, numexe=16, sleeptime=0.1) =
-    model(itp, [filter(!isnan, x(:h)); filter(!isnan, x(:b))], paths, datetime; pathstep, lwpc, numexe, sleeptime)
+model(itp::GeoStatsInterpolant, x::KeyedArray, paths, datetime; pathstep=100e3) =
+    model(itp, [filter(!isnan, x(:h)); filter(!isnan, x(:b))], paths, datetime; pathstep)
 
 function model(itp::ScatteredInterpolant, x, paths, datetime;
-    pathstep=100e3, lwpc=true, numexe=16, sleeptime=0.1)
+    pathstep=100e3)
 
     npts = length(x) ÷ 2
     hprimes = x[1:npts]
@@ -243,12 +239,9 @@ function model(itp::ScatteredInterpolant, x, paths, datetime;
         batch.inputs[i] = input
     end
 
-    if lwpc
-        computejob = LocalParallel("estimate", ".", "C:\\LWPCv21\\lwpm.exe", numexe, 90)
-        output = LWPC.run(batch, computejob; savefile=false, sleeptime=sleeptime)
-    else
-        output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
-    end
+   
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
+    
 
     amps = Vector{Float64}(undef, length(paths))
     phases = similar(amps)
@@ -266,26 +259,23 @@ function model(itp::ScatteredInterpolant, x, paths, datetime;
 
     return amps, phases
 end
-model(itp::ScatteredInterpolant, x::KeyedArray, paths, datetime; pathstep=100e3, lwpc=true, numexe=16, sleeptime=0.1) =
-    model(itp, [vec(x(:h)); vec(x(:b))], paths, datetime; pathstep, lwpc, numexe, sleeptime)
+model(itp::ScatteredInterpolant, x::KeyedArray, paths, datetime; pathstep=100e3) =
+    model(itp, [vec(x(:h)); vec(x(:b))], paths, datetime; pathstep)
 
 """
-    model(hbfcn::Function, paths, datetime; pathstep=100e3, lwpc=true, numexe=16, sleeptime=0.1)
+    model(hbfcn::Function, paths, datetime; pathstep=100e3)
 
 Use `hbfcn`, a function of `(lon, lat, datetime)`, to compute `(h′, β)` along each 
 vector of (transmitter, receiver) `paths`.
 
 `pathstep` is the segment length in meters along each path.
 
-If `lwpc` is `true`, then LWPC is used as the forward model. If `lwpc` is false, then
-LongwaveModePropagator is used as the forward model. As of `v0.2.0` of LongwaveModePropagator,
-it is significantly slower than LWPC when using many segemnts and thus not preferred for
-ionosphere estimation. `numexe` specifies the number of LWPC executables to use.
+LongwaveModePropagator is used as the forward model. 
 
 See also: [`model_observation`](@ref)
 """
 function model(hbfcn::Function, paths, datetime;
-    pathstep=100e3, lwpc=true, numexe=16, sleeptime=0.1)
+    pathstep=100e3)
 
     batch = BatchInput{ExponentialInput}()
     batch.name = "estimate"
@@ -299,12 +289,9 @@ function model(hbfcn::Function, paths, datetime;
         batch.inputs[i] = input
     end
 
-    if lwpc
-        computejob = LocalParallel("estimate", ".", "C:\\LWPCv21\\lwpm.exe", numexe, 90)
-        output = LWPC.run(batch, computejob; savefile=false, sleeptime=sleeptime)
-    else
-        output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
-    end
+
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
+    
 
     amps = Vector{Float64}(undef, length(paths))
     phases = similar(amps)

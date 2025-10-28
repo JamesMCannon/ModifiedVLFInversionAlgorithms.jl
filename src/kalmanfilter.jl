@@ -87,7 +87,9 @@ function LETKF_measupdate(H, xb, y, R;
         y_loc = y(path=Index(loc_mask))
 
         if :amp in datatypes && :phase in datatypes
-            Y_loc = [Y_loc(:amp); Y_loc(:phase)]
+            Y_loc = KeyedArray([Array(Y_loc(:amp)); Array(Y_loc(:phase))];
+                   path = vcat(collect(Y_loc.path), collect(Y_loc.path)),
+                   ens  = collect(Y_loc.ens))
             R_loc = @views Diagonal([R[1:npaths][loc_mask]; R[npaths+1:end][loc_mask]])
         else
             # Only amp or phase
@@ -107,7 +109,12 @@ function LETKF_measupdate(H, xb, y, R;
 
         # 7.
         if :amp in datatypes && :phase in datatypes
-            Δ = [y_loc(:amp) .-  ybar_loc(:amp); phasediff.(y_loc(:phase), ybar_loc(:phase))]
+            Δ = KeyedArray(
+                vcat(Array(y_loc(:amp)) .- Array(ybar_loc(:amp)),
+                    phasediff.(Array(y_loc(:phase)), Array(ybar_loc(:phase))));
+                path = vcat(collect(y_loc.path), collect(y_loc.path)),
+                ens  = ybar_loc.ens,   # <-- keep OneTo instead of collecting
+            )
         elseif :amp in datatypes
             Δ = y_loc(:amp) .- ybar_loc(:amp)
         elseif :phase in datatypes

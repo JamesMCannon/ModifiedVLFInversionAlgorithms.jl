@@ -19,19 +19,9 @@ function test_models()
     @test range(tx, rx) < input.output_ranges[end] < 2*range(tx, rx)
     @test all(0 .< input.ground_epsrs .<= 81)
 
-    a, p = model(itp, x, paths, dt; lwpc=false, pathstep=500e3)
+    a, p = model(itp, x, paths, dt; pathstep=500e3)
     @test length(a) == length(p) == 1
     @test abs(only(p)) <= 2π
-
-    if Sys.iswindows() && isfile("C:\\LWPCv21\\lwpm.exe")
-        al, pl = model(itp, x, paths, dt; lwpc=true, pathstep=500e3)
-        @test length(al) == length(pl) == 1
-        @test abs(only(pl)) <= 2π
-        @test rad2deg(abs(only(p - pl))) < 1
-        @test abs(only(a - al)) < 1
-    else
-        @info "    Skipping LWPC"
-    end
 
     # ## GeoStatsInterpolant
     τ = 2e-7*500e3
@@ -53,23 +43,13 @@ function test_models()
     @test range(tx, rx) < input.output_ranges[end] < 2*range(tx, rx)
     @test all(0 .< input.ground_epsrs .<= 81)
 
-    a, p = model(itp, x, paths, dt; lwpc=false, pathstep=500e3)
+    a, p = model(itp, x, paths, dt; pathstep=500e3)
     @test length(a) == length(p) == 1
     @test abs(only(p)) <= 2π
 
-    av, pv = model(itp, [vec(x(:h)); vec(x(:b))], paths, dt; lwpc=false, pathstep=500e3)
+    av, pv = model(itp, [vec(x(:h)); vec(x(:b))], paths, dt; pathstep=500e3)
     @test av ≈ a atol=1e-2
     @test pv ≈ p atol=1e-2
-
-    if Sys.iswindows() && isfile("C:\\LWPCv21\\lwpm.exe")
-        al, pl = model(itp, x, paths, dt; lwpc=true, pathstep=500e3)
-        @test length(al) == length(pl) == 1
-        @test abs(only(pl)) <= 2π
-        @test rad2deg(abs(only(p - pl))) < 1
-        @test abs(only(a - al)) < 1
-    else
-        @info "    Skipping LWPC"
-    end
 
     # ## hbfcn
     hbfcn(lo, la, dt) = ferguson(la, zenithangle(la, lo, dt), dt)
@@ -81,17 +61,7 @@ function test_models()
     @test range(tx, rx) < input.output_ranges[end] < 2*range(tx, rx)
     @test all(0 .< input.ground_epsrs .<= 81)
 
-    a, p = model(hbfcn, paths, dt; lwpc=false, pathstep=500e3)
+    a, p = model(hbfcn, paths, dt; pathstep=500e3)
     @test length(a) == length(p) == 1
     @test abs(only(p)) <= 2π
-
-    if Sys.iswindows() && isfile("C:\\LWPCv21\\lwpm.exe")
-        al, pl = model(hbfcn, paths, dt; lwpc=true, pathstep=500e3)
-        @test length(al) == length(pl) == 1
-        @test abs(only(pl)) <= 2π
-        @test rad2deg(abs(only(p - pl))) < 1
-        @test abs(only(a - al)) < 1
-    else
-        @info "    Skipping LWPC"
-    end
 end

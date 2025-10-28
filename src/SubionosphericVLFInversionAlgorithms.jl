@@ -10,7 +10,7 @@ using LongwaveModePropagator
 const LMP = LongwaveModePropagator
 using ProgressMeter
 
-using LMPTools, PropagationModelPrep
+using LMPTools
 
 export vfsa, LETKF_measupdate, nlopt_estimate
 export model, ensemble_model!, ScatteredInterpolant, GeoStatsInterpolant, lonlatmodel
