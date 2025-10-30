@@ -68,7 +68,7 @@ function test_grids()
     x[.!locmask] .= NaN
     @test build_xygrid(locmask, x_grid, y_grid) == build_xygrid(x)
 
-    gcp_boundary, _ = SIA.boundary_coords(paths)
+    gcp_boundary, _ = MVIA.boundary_coords(paths)
     @test gcp_boundary isa Vector  # sanity
 
     localization2 = obs2grid_distance(lola, paths)

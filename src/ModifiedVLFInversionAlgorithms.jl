@@ -1,4 +1,4 @@
-module SubionosphericVLFInversionAlgorithms
+module ModifiedVLFInversionAlgorithms
 
 using Random, Statistics, LinearAlgebra, Dates
 using StaticArrays, AxisKeys, Distributions

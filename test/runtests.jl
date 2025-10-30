@@ -5,8 +5,8 @@ using LongwaveModePropagator
 using UnPack
 
 using LMPTools
-using SubionosphericVLFInversionAlgorithms
-const SIA = SubionosphericVLFInversionAlgorithms
+using ModifiedVLFInversionAlgorithms
+const MVIA = ModifiedVLFInversionAlgorithms
 
 rosenbrock(x) =  (1.0 - x[1])^2 + 100.0 * (x[2] - x[1]^2)^2
 f_univariate(x) = 2only(x)^2 + 3only(x) + 1
@@ -83,8 +83,8 @@ function dayscenario()
 end
 
 
-@testset "SubionosphericVLFInversionAlgorithms" begin
-    @info "Testing SubionosphericVLFInversionAlgorithms"
+@testset "ModifiedVLFInversionAlgorithms" begin
+    @info "Testing ModifiedVLFInversionAlgorithms"
 
     @testset "Simulated annealing" begin
         @info "Testing simulated annealing"

@@ -10,7 +10,7 @@ function test_models()
 
     hitp = ScatteredInterpolation.interpolate(itp.method, itp.coords, vec(hprimes))
     bitp = ScatteredInterpolation.interpolate(itp.method, itp.coords, vec(betas))
-    input = SIA.model_observation(itp, hitp, bitp, tx, rx, dt)
+    input = MVIA.model_observation(itp, hitp, bitp, tx, rx, dt)
 
     # Make sure fields are filled in appropriately
     @test all(x->isapprox(x, 70, atol=0.1), input.hprimes)
@@ -34,7 +34,7 @@ function test_models()
     itp = GeoStatsInterpolant(solver, esri_102010(), xygrid)
 
     geox = georef((h=vec(hprimes), b=vec(betas)), itp.coords)
-    input = SIA.model_observation(itp, geox, tx, rx, dt)
+    input = MVIA.model_observation(itp, geox, tx, rx, dt)
 
     # Make sure fields are filled in appropriately
     @test all(input.hprimes .≈ 70)
@@ -53,7 +53,7 @@ function test_models()
 
     # ## hbfcn
     hbfcn(lo, la, dt) = ferguson(la, zenithangle(la, lo, dt), dt)
-    input = SIA.model_observation(hbfcn, tx, rx, dt)
+    input = MVIA.model_observation(hbfcn, tx, rx, dt)
 
     @test all(x->isapprox(x, 73, atol=1), input.hprimes)
     @test all(x->isapprox(x, 0.3, atol=0.1), input.betas)

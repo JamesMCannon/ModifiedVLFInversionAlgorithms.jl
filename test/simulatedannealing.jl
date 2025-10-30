@@ -13,7 +13,7 @@ function test_rosenbrock()
     @test_throws ArgumentError vfsa(rosenbrock, x0, [100, 100], [-100, -100], T, T; NK=100, NT=1)
 
     # Test if `rng` argument works
-    Random.seed!(SubionosphericVLFInversionAlgorithms.RNG, 1234)
+    Random.seed!(ModifiedVLFInversionAlgorithms.RNG, 1234)
     x1, E1 = vfsa(rosenbrock, x0, [-5, -5], [5, 5], T, T; NK=400, NT=50)
     x2, E2 = vfsa(rosenbrock, x0, [-5, -5], [5, 5], T, T; NK=400, NT=50, rng=MersenneTwister(1234))
     @test x1 == x2

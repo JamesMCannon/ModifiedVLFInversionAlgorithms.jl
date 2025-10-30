@@ -17,7 +17,7 @@ function letkf_setup(scenario)
 
     # ratio of true distance to model distance
     # multiplying by `modelscale` converts a modelproj distance to a WGS84 distance
-    truedr = SIA.mediandr(lola)
+    truedr = MVIA.mediandr(lola)
     modelscale = truedr/dr
     
     # ## Prior states
