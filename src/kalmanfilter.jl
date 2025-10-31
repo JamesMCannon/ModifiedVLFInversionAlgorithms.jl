@@ -134,6 +134,157 @@ function LETKF_measupdate(H, xb, y, R;
     return xa
 end
 
+function LETKF_measupdate(H, xb::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{KeyedArray, KeyedArray}}, y, R;
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
+
+    xy_grid = xb.xy_grid
+    tx_pwrs = xb.tx_pwrs
+
+    gridshape = (length(xy_grid.y), length(xy_grid.x))
+    ncells = prod(gridshape)
+    num_txs = length(tx_pwrs.pwrs)
+    npaths = length(y.path)
+    ens_size = length(xy_grid.ens)
+
+    if !isnothing(localization)
+        size(localization) == (ncells, npaths) ||
+            throw(ArgumentError("Size of `localization` must be `(ncells, npaths)`"))
+    end
+
+    # 1.
+    yb = H(xb)
+    # yb = KeyedArray(yb; field=[:amp, :phase], path=y.path, ens=xb.ens)
+    
+    ybar = mean(yb, dims=:ens)
+
+    if :amp in datatypes && :phase in datatypes
+        Y = similar(yb)
+        Y(:amp) .= yb(:amp) .- ybar(:amp)
+        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
+    elseif :amp in datatypes
+        Y = yb(:amp) .- ybar(:amp)
+    elseif :phase in datatypes
+        Y = phasediff.(yb(:phase), ybar(:phase))
+    end
+
+    # 2.
+    xy_gridbar = mean(xy_grid, dims=:ens)
+    Xxy_grid = xy_grid .- xy_gridbar
+    tx_pwrsbar = mean(tx_pwrs,dims=:ens)
+    Xtx_pwrs = tx_pwrs .- tx_pwrsbar
+
+    # 3. Localization, starting with grid
+    xy_grid_a = similar(xy_grid)
+    CI = CartesianIndices(gridshape)
+    for n in 1:ncells
+        yidx, xidx = CI[n][1], CI[n][2]
+
+        # Currently localization is binary (cell is included or not)
+        if isnothing(localization)
+            loc_mask = trues(npaths)
+        else
+            loc = view(localization, n, :)
+            loc_mask = loc .> 0
+            if !any(loc_mask)
+                # No measurements in range, nothing to update
+                xy_grid_a(y=Index(yidx), x=Index(xidx)) .= xy_grid(y=Index(yidx), x=Index(xidx))
+                continue
+            end
+        end
+
+        # Localize and flatten measurements
+        ybar_loc = ybar(path=Index(loc_mask))
+        Y_loc = Y(path=Index(loc_mask))
+        y_loc = y(path=Index(loc_mask))
+
+        if :amp in datatypes && :phase in datatypes
+            Y_loc = KeyedArray([Array(Y_loc(:amp)); Array(Y_loc(:phase))];
+                   path = vcat(collect(Y_loc.path), collect(Y_loc.path)),
+                   ens  = collect(Y_loc.ens))
+            R_loc = @views Diagonal([R[1:npaths][loc_mask]; R[npaths+1:end][loc_mask]])
+        else
+            # Only amp or phase
+            R_loc = @views Diagonal(R[loc_mask])
+        end
+
+        # 4.
+        C = strip(Y_loc)'/R_loc
+
+        # 5.
+        # Can apply ρ here if H is linear, or if ρ is close to 1
+        Patilde = inv((ens_size - 1)*I/ρ + C*Y_loc)
+
+        # 6.
+        # Symmetric square root
+        Wa = sqrt((ens_size - 1)*Hermitian(strip(Patilde)))
+
+        # 7.
+        if :amp in datatypes && :phase in datatypes
+            Δ = KeyedArray(
+                vcat(Array(y_loc(:amp)) .- Array(ybar_loc(:amp)),
+                    phasediff.(Array(y_loc(:phase)), Array(ybar_loc(:phase))));
+                path = vcat(collect(y_loc.path), collect(y_loc.path)),
+                ens  = ybar_loc.ens,   # <-- keep OneTo instead of collecting
+            )
+        elseif :amp in datatypes
+            Δ = y_loc(:amp) .- ybar_loc(:amp)
+        elseif :phase in datatypes
+            Δ = phasediff.(y_loc(:phase), ybar_loc(:phase))
+        end
+
+        wabar = Patilde*C*Δ
+        wa = Wa .+ wabar
+
+        # 8.
+        xy_gridbar_loc = xy_gridbar(y=Index(yidx), x=Index(xidx))
+        Xxy_grid_loc = Xxy_grid(y=Index(yidx), x=Index(xidx))
+
+        xy_grid_a(y=Index(yidx), x=Index(xidx)) .= Xxy_grid_loc*wa .+ xy_gridbar_loc
+    end
+
+    #For localizing TX power state variable, we consider only amplitude data 
+    #from paths that start at the current transmitter
+    tx_pwrs_a = similar(tx_pwrs)
+    for n in 1:num_txs
+        tx_string = String(tx_pwrs.pwrs[n])
+        # Currently localization is binary (cell is included or not)
+        loc_mask = BitVector()
+        loc_mask = [startswith(s, tx_string[1:3]) for s in y.path]
+
+        # Localize and flatten measurements
+        ybar_loc = ybar(path=Index(loc_mask), field=:amp)
+        Y_loc = Y(path=Index(loc_mask), field=:amp)
+        y_loc = y(path=Index(loc_mask), field=:amp)
+
+        R_loc = @views Diagonal(R[loc_mask])
+ 
+        # 4.
+        C = strip(Y_loc)'/R_loc
+
+        # 5.
+        # Can apply ρ here if H is linear, or if ρ is close to 1
+        Patilde = inv((ens_size - 1)*I/ρ + C*Y_loc)
+
+        # 6.
+        # Symmetric square root
+        Wa = sqrt((ens_size - 1)*Hermitian(strip(Patilde)))
+
+        # 7.
+        Δ = y_loc .- ybar_loc
+        
+        wabar = Patilde*C*Δ
+        wa = Wa .+ wabar
+
+        # 8.
+        tx_pwrsbar_loc = tx_pwrsbar(n)
+        Xtx_pwrs_loc = Xtx_pwrs(n)
+
+        tx_pwrs_a(n) .= Xtx_pwrs_loc*wa .+ tx_pwrsbar_loc
+    end
+    xa = (; xy_grid_a, tx_pwrs_a)
+    return xa
+end
+
 """
     ensemble_model!(ym, f, x)
 
@@ -144,6 +295,29 @@ function ensemble_model!(ym, f, x)
     #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
     for e in x.ens
         a, p = f(x(ens=e))
+        ym(:amp)(ens=e) .= a
+        ym(:phase)(ens=e) .= p
+    end
+
+    # Fit a Gaussian to phase data ensemble, then use wrap the phases from ±180° from the mean
+    for p in ym.path
+        ym(:phase)(path=p) .= modgaussian(ym(:phase)(path=p))
+    end
+
+    return ym
+end
+
+function ensemble_model!(ym, f, x::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{KeyedArray, KeyedArray}})
+    # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
+    #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
+
+    grid_state = x.xy_grid
+
+    for e in grid_state.ens
+        xy_grid = x.xy_grid(ens=e)
+        tx_pwrs = x.tx_pwrs(ens=e)
+        ens_state = (; xy_grid, tx_pwrs)
+        a, p = f(ens_state)
         ym(:amp)(ens=e) .= a
         ym(:phase)(ens=e) .= p
     end

@@ -5,6 +5,33 @@ Return path name string for (transmitter, receiver) path tuple `p`.
 """
 pathname(p) = p[1].name*"-"*p[2].name
 
+
+"""
+    rebuildpaths()
+
+Given a vector of `(Transmitter, Receiver)` propagation paths used in the scenarios,
+modify the power of the Transmitters using the values found in the NamedTuple tx_pwrs.
+tx_pwrs should be a slice of a KeyedArray and indexed by "pwrs = :calsign", ie tx_pwrs(pwrs = :NLK) 
+would return the desired new power for the NLK transmitter.
+"""
+function rebuildpaths(paths, tx_pwrs)
+
+    original_transmitters = unique(tx for (tx, _) in paths)
+    receivers = unique(rx for (_, rx) in paths)
+
+    revised_transmitters = [
+    LongwaveModePropagator.Transmitter{VerticalDipole}(
+        tx.name, tx.latitude, tx.longitude, tx.antenna, tx.frequency,
+        tx_pwrs(pwrs = Symbol(tx.name))
+    )
+    for tx in original_transmitters
+    ]
+
+    paths = [(tx, rx) for tx in revised_transmitters for rx in receivers]
+
+    return paths
+end
+
 """
     phasediff(a, b; deg=false)
 

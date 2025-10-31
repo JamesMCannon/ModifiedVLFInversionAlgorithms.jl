@@ -312,6 +312,16 @@ function model(hbfcn::Function, paths, datetime;
     return amps, phases
 end
 
+function model(itp::GeoStatsInterpolant, x::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{KeyedArray, KeyedArray}},
+    paths, datetime; pathstep=100e3)
+
+    paths = rebuildpaths(paths,x.tx_pwrs)
+    amps, phases = model(itp, x.xy_grid, paths, datetime; pathstep)
+    
+    return amps, phases
+end
+
+
 function lonlatsegment(lon, lat, dist, dt, hbfcn, nufcn, bfcn, gfcn)
     h, b = hbfcn(lon, lat, dt)
     return HomogeneousWaveguide(
