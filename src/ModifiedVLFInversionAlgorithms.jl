@@ -9,6 +9,7 @@ using ScatteredInterpolation, GeoStats, Interpolations
 using LongwaveModePropagator
 const LMP = LongwaveModePropagator
 using ProgressMeter
+using Base.Threads
 
 using LMPTools
 
@@ -17,7 +18,7 @@ export model, ensemble_model!, ScatteredInterpolant, GeoStatsInterpolant, lonlat
 export wgs84, esri_102010
 export gaspari1999_410, lonlatgrid_dists, obs2grid_diamondpill, obs2grid_distance, anylocal,
     modgaussian, build_xygrid, pathname, densify, gaussianstddev, compactlengthscale,
-    dense_grid, mediandr, filterbounds!, obs2grid_distances
+    dense_grid, mediandr, filterbounds!, obs2grid_distances, rebuildpaths
 export totalvariation, tikhonov_gradient, l2norm, objective, hubernorm, pseudohubernorm
 export phasediff
 
@@ -26,6 +27,8 @@ const RNG = MersenneTwister(1234)
 project_path(parts...) = normpath(@__DIR__, "..", parts...)
 
 wgs84() = "+proj=longlat +datum=WGS84 +no_defs"
+
+const proj_lock = ReentrantLock()
 
 # ESRI:102010, North America Equidistant Conic
 # esri_102010() = "+proj=eqdc +lat_0=40 +lon_0=-96 +lat_1=20 +lat_2=60 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs"

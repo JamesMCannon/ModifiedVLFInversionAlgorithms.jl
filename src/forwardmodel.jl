@@ -67,7 +67,9 @@ function model_observation(itp::GeoStatsInterpolant, geox, tx, rx, datetime; pat
     input, wpts = _model_observation(tx, rx; pathstep)
 
     # Projected wpts
-    trans = Proj.Transformation(wgs84(), itp.projection)
+    trans = lock(proj_lock) do 
+        Proj.Transformation(wgs84(), itp.projection)
+    end
     pts = PointSet(trans.(getindex.(wpts, :lon), getindex.(wpts, :lat)))
 
     problem = EstimationProblem(geox, pts, (:h, :b))
@@ -103,7 +105,9 @@ function model_observation(itp::ScatteredInterpolant, hitp, bitp, tx, rx, dateti
     input, wpts = _model_observation(tx, rx; pathstep)
 
     # Projected wpts
-    trans = Proj.Transformation(wgs84(), itp.projection)
+    trans = lock(proj_lock) do 
+        Proj.Transformation(wgs84(), itp.projection)
+    end
     pts = PointSet(trans.(getindex.(wpts, :lon), getindex.(wpts, :lat)))
 
     geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
@@ -309,15 +313,6 @@ function model(hbfcn::Function, paths, datetime;
         phases[i] = pitp(d)
     end
 
-    return amps, phases
-end
-
-function model(itp::GeoStatsInterpolant, x::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{KeyedArray, KeyedArray}},
-    paths, datetime; pathstep=100e3)
-
-    paths = rebuildpaths(paths,x.tx_pwrs)
-    amps, phases = model(itp, x.xy_grid, paths, datetime; pathstep)
-    
     return amps, phases
 end
 

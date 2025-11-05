@@ -134,8 +134,8 @@ function LETKF_measupdate(H, xb, y, R;
     return xa
 end
 
-function LETKF_measupdate(H, xb::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{KeyedArray, KeyedArray}}, y, R;
-    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
+function LETKF_measupdate(H, xb::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{A,B}}, y, R;
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase)) where {A<:KeyedArray, B<:KeyedArray}
 
     xy_grid = xb.xy_grid
     tx_pwrs = xb.tx_pwrs
@@ -249,14 +249,14 @@ function LETKF_measupdate(H, xb::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{KeyedArr
         tx_string = String(tx_pwrs.pwrs[n])
         # Currently localization is binary (cell is included or not)
         loc_mask = BitVector()
-        loc_mask = [startswith(s, tx_string[1:3]) for s in y.path]
+        loc_mask = BitVector([startswith(s, tx_string[1:3]) for s in y.path])
 
         # Localize and flatten measurements
         ybar_loc = ybar(path=Index(loc_mask), field=:amp)
         Y_loc = Y(path=Index(loc_mask), field=:amp)
         y_loc = y(path=Index(loc_mask), field=:amp)
 
-        R_loc = @views Diagonal(R[loc_mask])
+        R_loc = @views Diagonal(R[1:npaths][loc_mask])
  
         # 4.
         C = strip(Y_loc)'/R_loc
@@ -276,10 +276,10 @@ function LETKF_measupdate(H, xb::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{KeyedArr
         wa = Wa .+ wabar
 
         # 8.
-        tx_pwrsbar_loc = tx_pwrsbar(n)
-        Xtx_pwrs_loc = Xtx_pwrs(n)
+        tx_pwrsbar_loc = tx_pwrsbar(pwrs = Symbol(tx_string))
+        Xtx_pwrs_loc = Xtx_pwrs(pwrs = Symbol(tx_string), ens = Index(Xtx_pwrs.ens))' # Transpose necessary because Julia flattens 1x3 to (3,)
 
-        tx_pwrs_a(n) .= Xtx_pwrs_loc*wa .+ tx_pwrsbar_loc
+        tx_pwrs_a(pwrs = Symbol(tx_string)) .= parent(parent(Xtx_pwrs_loc*wa .+ tx_pwrsbar_loc))'
     end
     xa = (; xy_grid_a, tx_pwrs_a)
     return xa
@@ -293,7 +293,7 @@ Run the forward model `f` with `KeyedArray` argument `x` for each member of `x.e
 function ensemble_model!(ym, f, x)
     # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
     #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
-    for e in x.ens
+    Threads.@threads for e in x.ens
         a, p = f(x(ens=e))
         ym(:amp)(ens=e) .= a
         ym(:phase)(ens=e) .= p
@@ -307,13 +307,12 @@ function ensemble_model!(ym, f, x)
     return ym
 end
 
-function ensemble_model!(ym, f, x::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{KeyedArray, KeyedArray}})
+function ensemble_model!(ym, f, x::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{A,B}}) where {A<:KeyedArray, B<:KeyedArray}
     # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
     #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
-
     grid_state = x.xy_grid
 
-    for e in grid_state.ens
+    @showprogress Threads.@threads for e in grid_state.ens
         xy_grid = x.xy_grid(ens=e)
         tx_pwrs = x.tx_pwrs(ens=e)
         ens_state = (; xy_grid, tx_pwrs)
