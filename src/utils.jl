@@ -15,21 +15,14 @@ tx_pwrs should be a slice of a KeyedArray and indexed by "pwrs = :calsign", ie t
 would return the desired new power for the NLK transmitter.
 """
 function rebuildpaths(paths, tx_pwrs)
-
-    original_transmitters = unique(tx for (tx, _) in paths)
-    receivers = unique(rx for (_, rx) in paths)
-
-    revised_transmitters = [
-    LongwaveModePropagator.Transmitter{VerticalDipole}(
-        tx.name, tx.latitude, tx.longitude, tx.antenna, tx.frequency,
-        tx_pwrs(pwrs = Symbol(tx.name))
-    )
-    for tx in original_transmitters
-    ]
-
-    paths = [(tx, rx) for tx in revised_transmitters for rx in receivers]
-
-    return paths
+    revised_paths = map(paths) do (tx, rx)
+        new_tx = LongwaveModePropagator.Transmitter{VerticalDipole}(
+            tx.name, tx.latitude, tx.longitude, tx.antenna, tx.frequency,
+            tx_pwrs(pwrs = Symbol(tx.name))
+        )
+        (new_tx, rx)
+    end
+    return revised_paths
 end
 
 """
