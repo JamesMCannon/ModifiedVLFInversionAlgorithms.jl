@@ -48,6 +48,7 @@ function _model_observation(tx, rx; pathstep=100e3)
     input.ground_sigmas = similar(input.segment_ranges)
     input.ground_epsrs = Vector{Int}(undef, length(wpts))
     input.frequency = tx.frequency.f
+    input.power = tx.power
 
     # NOTE: if changing `output_ranges` step, must also update in `model`!
     input.output_ranges = collect(0:5e3:round(range(tx, rx)+10e3, digits=-4, RoundUp))
