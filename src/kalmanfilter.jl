@@ -48,13 +48,13 @@ function LETKF_measupdate(H, xb, y, R;
         Y = phasediff.(yb(:phase), ybar(:phase))
     end
 
-    xa = xy_grid_update(xb, y, ybar, Y, R;
+    xa = xy_state_update(xb, y, ybar, Y, R;
         ρ=ρ, localization=localization, datatypes=datatypes)
 
     return xa
 end
 
-function LETKF_measupdate(H, xb::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{A,B}}, y, R;
+function LETKF_measupdate(H, xb::NamedTuple{(:xy_state, :tx_pwrs), Tuple{A,B}}, y, R;
     ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase)) where {A<:KeyedArray, B<:KeyedArray}
 
     # 1.
@@ -75,38 +75,38 @@ function LETKF_measupdate(H, xb::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{A,B}}, y
 
     # Because we localize the measurements to each element of the total state vector separately,
     # we can perform the updates on each state variable independently and then recombine.
-    xy_grid = xy_grid_update(xb.xy_grid, y, ybar, Y, R;
+    xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
         ρ=ρ, localization=localization, datatypes=datatypes)
 
     tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
 
-    xa = (; xy_grid, tx_pwrs)
+    xa = (; xy_state, tx_pwrs)
     return xa
 end
 
 """
-    xy_grid_update(xy_grid, y, ybar, Y, R; ρ=1.1, localization=nothing, datatypes=(:amp, :phase)) → xy_grid_a
-Perform LETKF analysis update on only the `xy_grid` state variable, given the measurements `y`, mean of the modeled measurements `ybar`, 
+    xy_state_update(xy_state, y, ybar, Y, R; ρ=1.1, localization=nothing, datatypes=(:amp, :phase)) → xy_state_a
+Perform LETKF analysis update on only the `xy_state` state variable, given the measurements `y`, mean of the modeled measurements `ybar`, 
 ensemble differences from that mean `Y`, and the observation noise covariance `R`.
 """
-function xy_grid_update(xy_grid, y, ybar, Y, R;
+function xy_state_update(xy_state, y, ybar, Y, R;
     ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
-    
-    gridshape = (length(xy_grid.y), length(xy_grid.x))
+
+    gridshape = (length(xy_state.y), length(xy_state.x))
     ncells = prod(gridshape)
     npaths = length(y.path)
-    ens_size = length(xy_grid.ens)
+    ens_size = length(xy_state.ens)
 
     if !isnothing(localization)
         size(localization) == (ncells, npaths) ||
             throw(ArgumentError("Size of `localization` must be `(ncells, npaths)`"))
     end    
 
-    xy_gridbar = mean(xy_grid, dims=:ens)
-    Xxy_grid = xy_grid .- xy_gridbar
+    xy_statebar = mean(xy_state, dims=:ens)
+    Xxy_state = xy_state .- xy_statebar
 
      # 3. Localization, starting with grid
-    xy_grid_a = similar(xy_grid)
+    xy_state_a = similar(xy_state)
     CI = CartesianIndices(gridshape)
     for n in 1:ncells
         yidx, xidx = CI[n][1], CI[n][2]
@@ -119,7 +119,7 @@ function xy_grid_update(xy_grid, y, ybar, Y, R;
             loc_mask = loc .> 0
             if !any(loc_mask)
                 # No measurements in range, nothing to update
-                xy_grid_a(y=Index(yidx), x=Index(xidx)) .= xy_grid(y=Index(yidx), x=Index(xidx))
+                xy_state_a(y=Index(yidx), x=Index(xidx)) .= xy_state(y=Index(yidx), x=Index(xidx))
                 continue
             end
         end
@@ -168,12 +168,12 @@ function xy_grid_update(xy_grid, y, ybar, Y, R;
         wa = Wa .+ wabar
 
         # 8.
-        xy_gridbar_loc = xy_gridbar(y=Index(yidx), x=Index(xidx))
-        Xxy_grid_loc = Xxy_grid(y=Index(yidx), x=Index(xidx))
+        xy_statebar_loc = xy_statebar(y=Index(yidx), x=Index(xidx))
+        Xxy_state_loc = Xxy_state(y=Index(yidx), x=Index(xidx))
 
-        xy_grid_a(y=Index(yidx), x=Index(xidx)) .= Xxy_grid_loc*wa .+ xy_gridbar_loc
+        xy_state_a(y=Index(yidx), x=Index(xidx)) .= Xxy_state_loc*wa .+ xy_statebar_loc
     end
-    return xy_grid_a
+    return xy_state_a
 end
 
 """
@@ -256,15 +256,15 @@ function ensemble_model!(ym, f, x)
     return ym
 end
 
-function ensemble_model!(ym, f, x::NamedTuple{(:xy_grid, :tx_pwrs), Tuple{A,B}}) where {A<:KeyedArray, B<:KeyedArray}
+function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :tx_pwrs), Tuple{A,B}}) where {A<:KeyedArray, B<:KeyedArray}
     # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
     #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
-    grid_state = x.xy_grid
+    grid_state = x.xy_state
 
     @showprogress Threads.@threads for e in grid_state.ens
-        xy_grid = x.xy_grid(ens=e)
+        xy_state = x.xy_state(ens=e)
         tx_pwrs = x.tx_pwrs(ens=e)
-        ens_state = (; xy_grid, tx_pwrs)
+        ens_state = (; xy_state, tx_pwrs)
         a, p = f(ens_state)
         ym(:amp)(ens=e) .= a
         ym(:phase)(ens=e) .= p
