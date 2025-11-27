@@ -86,8 +86,8 @@ end
 
 """
     xy_state_update(xy_state, y, ybar, Y, R; ρ=1.1, localization=nothing, datatypes=(:amp, :phase)) → xy_state_a
-Perform LETKF analysis update on only the `xy_state` state variable, given the measurements `y`, mean of the modeled measurements `ybar`, 
-ensemble differences from that mean `Y`, and the observation noise covariance `R`.
+    Perform LETKF analysis update on only the `xy_state` state variable, given the measurements `y`, mean of the modeled measurements `ybar`, 
+    ensemble differences from that mean `Y`, and the observation noise covariance `R`.
 """
 function xy_state_update(xy_state, y, ybar, Y, R;
     ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
@@ -178,8 +178,8 @@ end
 
 """
     tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1) → tx_pwrs_a
-Perform LETKF analysis update on only the `tx_pwrs` bias offset state variable, given the measurements `y`,
-mean of the modeled measurements `ybar`, ensemble differences from that mean `Y`, and the observation noise covariance `R`.
+    Perform LETKF analysis update on only the `tx_pwrs` bias offset state variable, given the measurements `y`,
+    mean of the modeled measurements `ybar`, ensemble differences from that mean `Y`, and the observation noise covariance `R`.
 """
 function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1)
     
@@ -259,15 +259,64 @@ end
 function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :tx_pwrs), Tuple{A,B}}) where {A<:KeyedArray, B<:KeyedArray}
     # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
     #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
-    grid_state = x.xy_state
-
-    @showprogress Threads.@threads for e in grid_state.ens
+    @showprogress Threads.@threads for e in x.xy_state.ens
         xy_state = x.xy_state(ens=e)
         tx_pwrs = x.tx_pwrs(ens=e)
         ens_state = (; xy_state, tx_pwrs)
         a, p = f(ens_state)
         ym(:amp)(ens=e) .= a
         ym(:phase)(ens=e) .= p
+    end
+
+    # Fit a Gaussian to phase data ensemble, then use wrap the phases from ±180° from the mean
+    for p in ym.path
+        ym(:phase)(path=p) .= modgaussian(ym(:phase)(path=p))
+    end
+
+    return ym
+end
+
+function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :rx_phi_offset), Tuple{A,B}}) where {A<:KeyedArray, B<:KeyedArray}
+    # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
+    #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
+
+    @showprogress Threads.@threads for e in x.xy_state.ens
+        xy_state = x.xy_state(ens=e)
+        a, p = f(xy_state)
+        ym(:amp)(ens=e) .= a
+        ym(:phase)(ens=e) .= p
+
+        # Apply receiver phase offsets
+        for p in ym.path
+            ym(:phase)(path=p, ens=e) += x.rx_phi_offset(path=p, ens=e) * π/2 # Expecting integer values (of type Float64) of nπ/2 within [0 3] for phase in radians
+        end
+    end
+
+    # Fit a Gaussian to phase data ensemble, then use wrap the phases from ±180° from the mean
+    for p in ym.path
+        ym(:phase)(path=p) .= modgaussian(ym(:phase)(path=p))
+    end
+
+    return ym
+end
+
+
+function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :tx_pwrs, :rx_phi_offset), Tuple{A,B,C}}) where {A<:KeyedArray, B<:KeyedArray, C<:KeyedArray,}
+    # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
+    #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
+
+    @showprogress Threads.@threads for e in x.xy_state.ens
+        xy_state = x.xy_state(ens=e)
+        tx_pwrs = x.tx_pwrs(ens=e)
+        ens_state = (; xy_state, tx_pwrs)
+        a, p = f(ens_state)
+        ym(:amp)(ens=e) .= a
+        ym(:phase)(ens=e) .= p
+
+        # Apply receiver phase offsets
+        for p in ym.path
+            ym(:phase)(path=p, ens=e) += x.rx_phi_offset(path=p, ens=e) * π/2 # Expecting integer values (of type Float64) of nπ/2 within [0 3] for phase in radians
+        end
     end
 
     # Fit a Gaussian to phase data ensemble, then use wrap the phases from ±180° from the mean
