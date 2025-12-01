@@ -84,6 +84,37 @@ function LETKF_measupdate(H, xb::NamedTuple{(:xy_state, :tx_pwrs), Tuple{A,B}}, 
     return xa
 end
 
+function LETKF_measupdate(H, xb::NamedTuple{(:xy_state, :rx_phi_offset), Tuple{A,B}}, y, R;
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase)) where {A<:KeyedArray, B<:KeyedArray}
+
+    # 1.
+    yb = H(xb)
+    # yb = KeyedArray(yb; field=[:amp, :phase], path=y.path, ens=xb.ens)
+    
+    ybar = mean(yb, dims=:ens)
+
+    if :amp in datatypes && :phase in datatypes
+        Y = similar(yb)
+        Y(:amp) .= yb(:amp) .- ybar(:amp)
+        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
+    elseif :amp in datatypes
+        Y = yb(:amp) .- ybar(:amp)
+    elseif :phase in datatypes
+        Y = phasediff.(yb(:phase), ybar(:phase))
+    end
+
+    # Because we localize the measurements to each element of the total state vector separately,
+    # we can perform the updates on each state variable independently and then recombine.
+    xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
+        ρ=ρ, localization=localization, datatypes=datatypes)
+
+    rx_phi_offset = rx_phi_update(xb.rx_phi_offset, y, ybar, Y, R; ρ=ρ)
+
+    xa = (; xy_state, rx_phi_offset)
+    return xa
+end
+
+
 """
     xy_state_update(xy_state, y, ybar, Y, R; ρ=1.1, localization=nothing, datatypes=(:amp, :phase)) → xy_state_a
     Perform LETKF analysis update on only the `xy_state` state variable, given the measurements `y`, mean of the modeled measurements `ybar`, 
@@ -232,6 +263,72 @@ function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1)
     end
 
     return tx_pwrs_a
+end
+
+
+"""
+    rx_phi_update(tx_pwrs, y, ybar, Y, R; ρ=1.1) → tx_pwrs_a
+    Perform LETKF analysis update on only the `tx_pwrs` bias offset state variable, given the measurements `y`,
+    mean of the modeled measurements `ybar`, ensemble differences from that mean `Y`, and the observation noise covariance `R`.
+"""
+function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
+    
+    missing = setdiff(rx_phi_offset.path, y.path)
+    #check that all paths in rx_phi_offset are in y.path
+    if isempty(missing)
+        # ok
+    else
+        error("Missing entries from y.path: $(missing)")
+    end
+
+    npaths = length(y.path)
+    ens_size = length(rx_phi_offset.ens)
+
+    # 2.
+    rx_phibar = mean(rx_phi_offset,dims=:ens)
+    Xrx_phi = rx_phi_offset .- rx_phibar
+
+    #For localizing RX phase offset state variable, we consider only phase data 
+    #from the current path.
+    rx_phi_offset_a = similar(rx_phi_offset)
+    for n in 1:npaths
+        p_string = String(rx_phi_offset.path[n])
+        # Currently localization is binary (cell is included or not)
+        loc_mask = BitVector()
+        loc_mask = BitVector([s == p_string for s in y.path])
+
+        # Localize and flatten measurements
+        ybar_loc = ybar(path=Index(loc_mask), field=:phase)
+        Y_loc = Y(path=Index(loc_mask), field=:phase)
+        y_loc = y(path=Index(loc_mask), field=:phase)
+
+        R_loc = @views Diagonal(R[npaths+1:end][loc_mask])
+ 
+        # 4.
+        C = strip(Y_loc)'/R_loc
+
+        # 5.
+        # Can apply ρ here if H is linear, or if ρ is close to 1
+        Patilde = inv((ens_size - 1)*I/ρ + C*Y_loc)
+
+        # 6.
+        # Symmetric square root
+        Wa = sqrt((ens_size - 1)*Hermitian(strip(Patilde)))
+
+        # 7.
+        Δ = y_loc .- ybar_loc
+        
+        wabar = Patilde*C*Δ
+        wa = Wa .+ wabar
+
+        # 8.
+        rx_phibar_loc = rx_phibar(path = p_string)
+        Xrx_phi_loc = Xrx_phi(path = p_string, ens = Index(Xrx_phi.ens))' # Transpose necessary because Julia flattens 1xk to (k,)
+
+        rx_phi_offset_a(path = p_string) .= parent(parent(Xrx_phi_loc*wa .+ rx_phibar_loc))'
+    end
+
+    return rx_phi_offset_a
 end
 
 """
