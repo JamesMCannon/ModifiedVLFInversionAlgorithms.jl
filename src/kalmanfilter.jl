@@ -385,7 +385,7 @@ function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :rx_phi_offset), Tuple
 
         # Apply receiver phase offsets
         for p in ym.path
-            ym(:phase)(path=p, ens=e) += x.rx_phi_offset(path=p, ens=e) * π/2 # Expecting integer values (of type Float64) of nπ/2 within [0 3] for phase in radians
+            ym(field=:phase, path=p, ens=e) .= ym(field=:phase, path=p, ens=e) + x.rx_phi_offset(path=p, ens=e) * π/2 # Expecting integer values (of type Float64) of nπ/2 within [0 3] for phase in radians
         end
     end
 
@@ -412,7 +412,7 @@ function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :tx_pwrs, :rx_phi_offs
 
         # Apply receiver phase offsets
         for p in ym.path
-            ym(:phase)(path=p, ens=e) += x.rx_phi_offset(path=p, ens=e) * π/2 # Expecting integer values (of type Float64) of nπ/2 within [0 3] for phase in radians
+            ym(field=:phase, path=p, ens=e) .= ym(field=:phase, path=p, ens=e) + x.rx_phi_offset(path=p, ens=e) * π/2 # Expecting integer values (of type Float64) of nπ/2 within [0 3] for phase in radians
         end
     end
 
