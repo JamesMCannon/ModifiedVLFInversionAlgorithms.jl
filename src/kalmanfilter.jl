@@ -77,18 +77,18 @@ function LETKF_measupdate(H, xb::NamedTuple, y, R;
     # 3. Update each field if it exists
     updated_fields = NamedTuple()
     
-    if hasfield(xb, :xy_state)
+    if haskey(xb, :xy_state)
         xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
                                    ρ=ρ, localization=localization, datatypes=datatypes)
         updated_fields = merge(updated_fields, (; xy_state))
     end
 
-    if hasfield(xb, :tx_pwrs)
+    if haskey(xb, :tx_pwrs)
         tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
         updated_fields = merge(updated_fields, (; tx_pwrs))
     end
 
-    if hasfield(xb, :rx_phi_offset)
+    if haskey(xb, :rx_phi_offset)
         rx_phi_offset = rx_phi_update(xb.rx_phi_offset, y, ybar, Y, R; ρ=ρ)
         updated_fields = merge(updated_fields, (; rx_phi_offset))
     end
@@ -343,7 +343,7 @@ function ensemble_model!(ym, f, x::NamedTuple)
         # Construct the ensemble input dynamically
         ens_state = NamedTuple()
         ens_state = merge(ens_state, (; xy_state))
-        if hasfield(x, :tx_pwrs)
+        if haskey(x, :tx_pwrs)
             tx_pwrs = x.tx_pwrs(ens=e)
             ens_state = merge(ens_state, (; tx_pwrs))
         end
@@ -354,7 +354,7 @@ function ensemble_model!(ym, f, x::NamedTuple)
         ym(:phase)(ens=e) .= p
 
         # Apply receiver phase offsets if present
-        if hasfield(x, :rx_phi_offset)
+        if haskey(x, :rx_phi_offset)
             for pth in ym.path
                 ym(field=:phase, path=pth, ens=e) .= 
                     ym(field=:phase, path=pth, ens=e) + x.rx_phi_offset(path=pth, ens=e) * π/2
