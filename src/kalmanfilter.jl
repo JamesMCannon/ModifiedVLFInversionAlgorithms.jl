@@ -355,10 +355,7 @@ function ensemble_model!(ym, f, x::NamedTuple)
 
         # Apply receiver phase offsets if present
         if haskey(x, :rx_phi_offset)
-            for pth in ym.path
-                ym(field=:phase, path=pth, ens=e) .= 
-                    ym(field=:phase, path=pth, ens=e) + x.rx_phi_offset(path=pth, ens=e) * π/2
-            end
+            ym(field=:phase, ens=e) .+= x.rx_phi_offset(ens=e) .* (π/2) #implicitly, all paths must be in the same order
         end
     end
 
