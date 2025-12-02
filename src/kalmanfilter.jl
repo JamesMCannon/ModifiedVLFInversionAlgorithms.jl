@@ -54,15 +54,14 @@ function LETKF_measupdate(H, xb, y, R;
     return xa
 end
 
-function LETKF_measupdate(H, xb::NamedTuple{(:xy_state, :tx_pwrs), Tuple{A,B}}, y, R;
-    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase)) where {A<:KeyedArray, B<:KeyedArray}
+function LETKF_measupdate(H, xb::NamedTuple, y, R;
+                          ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
 
-    # 1.
+    # 1. Compute ensemble measurements
     yb = H(xb)
-    # yb = KeyedArray(yb; field=[:amp, :phase], path=y.path, ens=xb.ens)
-    
     ybar = mean(yb, dims=:ens)
 
+    # 2. Centered measurement perturbations
     if :amp in datatypes && :phase in datatypes
         Y = similar(yb)
         Y(:amp) .= yb(:amp) .- ybar(:amp)
@@ -71,49 +70,31 @@ function LETKF_measupdate(H, xb::NamedTuple{(:xy_state, :tx_pwrs), Tuple{A,B}}, 
         Y = yb(:amp) .- ybar(:amp)
     elseif :phase in datatypes
         Y = phasediff.(yb(:phase), ybar(:phase))
+    else
+        error("Unknown datatypes: $datatypes")
     end
 
-    # Because we localize the measurements to each element of the total state vector separately,
-    # we can perform the updates on each state variable independently and then recombine.
-    xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
-        ρ=ρ, localization=localization, datatypes=datatypes)
-
-    tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
-
-    xa = (; xy_state, tx_pwrs)
-    return xa
-end
-
-function LETKF_measupdate(H, xb::NamedTuple{(:xy_state, :rx_phi_offset), Tuple{A,B}}, y, R;
-    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase)) where {A<:KeyedArray, B<:KeyedArray}
-
-    # 1.
-    yb = H(xb)
-    # yb = KeyedArray(yb; field=[:amp, :phase], path=y.path, ens=xb.ens)
+    # 3. Update each field if it exists
+    updated_fields = NamedTuple()
     
-    ybar = mean(yb, dims=:ens)
-
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
-        Y(:amp) .= yb(:amp) .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
+    if hasfield(xb, :xy_state)
+        xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
+                                   ρ=ρ, localization=localization, datatypes=datatypes)
+        updated_fields = merge(updated_fields, (; xy_state))
     end
 
-    # Because we localize the measurements to each element of the total state vector separately,
-    # we can perform the updates on each state variable independently and then recombine.
-    xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
-        ρ=ρ, localization=localization, datatypes=datatypes)
+    if hasfield(xb, :tx_pwrs)
+        tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
+        updated_fields = merge(updated_fields, (; tx_pwrs))
+    end
 
-    rx_phi_offset = rx_phi_update(xb.rx_phi_offset, y, ybar, Y, R; ρ=ρ)
+    if hasfield(xb, :rx_phi_offset)
+        rx_phi_offset = rx_phi_update(xb.rx_phi_offset, y, ybar, Y, R; ρ=ρ)
+        updated_fields = merge(updated_fields, (; rx_phi_offset))
+    end
 
-    xa = (; xy_state, rx_phi_offset)
-    return xa
+    return updated_fields
 end
-
 
 """
     xy_state_update(xy_state, y, ybar, Y, R; ρ=1.1, localization=nothing, datatypes=(:amp, :phase)) → xy_state_a
@@ -353,72 +334,37 @@ function ensemble_model!(ym, f, x)
     return ym
 end
 
-function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :tx_pwrs), Tuple{A,B}}) where {A<:KeyedArray, B<:KeyedArray}
+function ensemble_model!(ym, f, x::NamedTuple)
     # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
     #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
     @showprogress Threads.@threads for e in x.xy_state.ens
         xy_state = x.xy_state(ens=e)
-        tx_pwrs = x.tx_pwrs(ens=e)
-        ens_state = (; xy_state, tx_pwrs)
-        a, p = f(ens_state)
-        ym(:amp)(ens=e) .= a
-        ym(:phase)(ens=e) .= p
-    end
 
-    # Fit a Gaussian to phase data ensemble, then use wrap the phases from ±180° from the mean
-    for p in ym.path
-        ym(:phase)(path=p) .= modgaussian(ym(:phase)(path=p))
-    end
-
-    return ym
-end
-
-function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :rx_phi_offset), Tuple{A,B}}) where {A<:KeyedArray, B<:KeyedArray}
-    # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
-    #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
-
-    @showprogress Threads.@threads for e in x.xy_state.ens
-        xy_state = x.xy_state(ens=e)
-        a, p = f(xy_state)
-        ym(:amp)(ens=e) .= a
-        ym(:phase)(ens=e) .= p
-
-        # Apply receiver phase offsets
-        for p in ym.path
-            ym(field=:phase, path=p, ens=e) .= ym(field=:phase, path=p, ens=e) + x.rx_phi_offset(path=p, ens=e) * π/2 # Expecting integer values (of type Float64) of nπ/2 within [0 3] for phase in radians
+        # Construct the ensemble input dynamically
+        ens_state = NamedTuple()
+        ens_state = merge(ens_state, (; xy_state))
+        if hasfield(x, :tx_pwrs)
+            tx_pwrs = x.tx_pwrs(ens=e)
+            ens_state = merge(ens_state, (; tx_pwrs))
         end
-    end
 
-    # Fit a Gaussian to phase data ensemble, then use wrap the phases from ±180° from the mean
-    for p in ym.path
-        ym(:phase)(path=p) .= modgaussian(ym(:phase)(path=p))
-    end
-
-    return ym
-end
-
-
-function ensemble_model!(ym, f, x::NamedTuple{(:xy_state, :tx_pwrs, :rx_phi_offset), Tuple{A,B,C}}) where {A<:KeyedArray, B<:KeyedArray, C<:KeyedArray,}
-    # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
-    #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
-
-    @showprogress Threads.@threads for e in x.xy_state.ens
-        xy_state = x.xy_state(ens=e)
-        tx_pwrs = x.tx_pwrs(ens=e)
-        ens_state = (; xy_state, tx_pwrs)
+        # Evaluate model
         a, p = f(ens_state)
         ym(:amp)(ens=e) .= a
         ym(:phase)(ens=e) .= p
 
-        # Apply receiver phase offsets
-        for p in ym.path
-            ym(field=:phase, path=p, ens=e) .= ym(field=:phase, path=p, ens=e) + x.rx_phi_offset(path=p, ens=e) * π/2 # Expecting integer values (of type Float64) of nπ/2 within [0 3] for phase in radians
+        # Apply receiver phase offsets if present
+        if hasfield(x, :rx_phi_offset)
+            for pth in ym.path
+                ym(field=:phase, path=pth, ens=e) .= 
+                    ym(field=:phase, path=pth, ens=e) + x.rx_phi_offset(path=pth, ens=e) * π/2
+            end
         end
     end
 
-    # Fit a Gaussian to phase data ensemble, then use wrap the phases from ±180° from the mean
-    for p in ym.path
-        ym(:phase)(path=p) .= modgaussian(ym(:phase)(path=p))
+    # Wrap phase ensemble around ±180°
+    for pth in ym.path
+        ym(:phase)(path=pth) .= modgaussian(ym(:phase)(path=pth))
     end
 
     return ym
