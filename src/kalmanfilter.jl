@@ -254,12 +254,12 @@ end
 """
 function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
     
-    missing = setdiff(rx_phi_offset.path, y.path)
+    missing_paths = setdiff(rx_phi_offset.path, y.path)
     #check that all paths in rx_phi_offset are in y.path
-    if isempty(missing)
+    if isempty(missing_paths)
         # ok
     else
-        error("Missing entries from y.path: $(missing)")
+        error("Missing entries from y.path: $(missing_paths)")
     end
 
     npaths = length(y.path)
@@ -267,7 +267,15 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
 
     # 2.
     rx_phibar = mean(rx_phi_offset,dims=:ens)
-    Xrx_phi = rx_phi_offset .- rx_phibar
+
+    for p in rx_phi_offset.path
+        rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
+    end
+
+    Xrx_phi = similar(rx_phi_offset)
+    for e in rx_phi_offset.ens
+        Xrx_phi(ens=e) .= dropdims(circular_diff.(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
+    end
 
     #For localizing RX phase offset state variable, we consider only phase data 
     #from the current path.
@@ -297,7 +305,7 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         Wa = sqrt((ens_size - 1)*Hermitian(strip(Patilde)))
 
         # 7.
-        Δ = y_loc .- ybar_loc
+        Δ = phasediff.(y_loc, ybar_loc)
         
         wabar = Patilde*C*Δ
         wa = Wa .+ wabar
