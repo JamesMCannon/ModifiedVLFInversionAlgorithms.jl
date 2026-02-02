@@ -294,11 +294,11 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         R_loc = @views Diagonal(R[npaths+1:end][loc_mask])
  
         # 4.
-        C = strip(Y_loc)'/R_loc
+        C = transpose(strip(Y_loc))/R_loc
 
         # 5.
         # Can apply ρ here if H is linear, or if ρ is close to 1
-        Patilde = inv((ens_size - 1)*I/ρ + C*Y_loc)
+        Patilde = inv(Hermitian((ens_size - 1)*I/ρ + C*Y_loc))
 
         # 6.
         # Symmetric square root
@@ -312,9 +312,9 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
 
         # 8.
         rx_phibar_loc = rx_phibar(path = p_string)
-        Xrx_phi_loc = Xrx_phi(path = p_string, ens = Index(Xrx_phi.ens))' # Transpose necessary because Julia flattens 1xk to (k,)
+        Xrx_phi_loc = transpose(Xrx_phi(path = p_string, ens = Index(Xrx_phi.ens))) # Transpose necessary because Julia flattens 1xk to (k,)
 
-        rx_phi_offset_a(path = p_string) .= parent(parent(Xrx_phi_loc*wa .+ rx_phibar_loc))'
+        rx_phi_offset_a(path = p_string) .= transpose(parent(parent(Xrx_phi_loc*wa .+ rx_phibar_loc)))
     end
 
     return rx_phi_offset_a
