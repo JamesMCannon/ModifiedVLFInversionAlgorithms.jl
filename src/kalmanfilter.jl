@@ -298,11 +298,11 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
 
         # 5.
         # Can apply ρ here if H is linear, or if ρ is close to 1
-        Patilde = inv(Hermitian((ens_size - 1)*I/ρ + C*Y_loc))
+        Patilde = inv(Hermitian((ens_size - 1)*I/ρ + C*Y_loc)) #Possibly persue explicit symmetric construction and use / rather than inv()
 
         # 6.
         # Symmetric square root
-        Wa = sqrt((ens_size - 1)*Hermitian(strip(Patilde)))
+        Wa = sqrt((ens_size - 1)*Hermitian(Patilde))
 
         # 7.
         Δ = phasediff.(y_loc, ybar_loc)
