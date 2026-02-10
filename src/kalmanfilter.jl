@@ -291,8 +291,13 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         Y_loc = Y(path=Index(loc_mask), field=:phase)
         y_loc = y(path=Index(loc_mask), field=:phase)
 
-        R_loc = @views Diagonal(R[npaths+1:end][loc_mask])
- 
+        # Indices of R to be copied to R_loc depends on whether y has amp and phase measurements or just phase. 
+        # Regardless, only phase is used to update rx_phi_offset
+        if length(y.path) == length(rx_phi_offset.path)
+            R_loc = @views Diagonal(R[1:end][loc_mask])
+        else
+            R_loc = @views Diagonal(R[npaths+1:end][loc_mask])
+        end
         # 4.
         C = transpose(strip(Y_loc))/R_loc
 
