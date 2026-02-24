@@ -199,7 +199,7 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
     end
 
    
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(200000, 1e-5, true)))
     
 
     amps = Vector{Float64}(undef, length(paths))
@@ -245,7 +245,7 @@ function model(itp::ScatteredInterpolant, x, paths, datetime;
     end
 
    
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(200000, 1e-5, true)))
     
 
     amps = Vector{Float64}(undef, length(paths))
@@ -295,7 +295,7 @@ function model(hbfcn::Function, paths, datetime;
     end
 
 
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(200000, 1e-5, true)))
     
 
     amps = Vector{Float64}(undef, length(paths))
