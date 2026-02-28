@@ -200,7 +200,7 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
 
    
     output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
-    
+    #TODO: Dynamically set grpfparams tolerance based on hprimes, betas, and frequency to speed up LMP runs without sacrificing accuracy.
 
     amps = Vector{Float64}(undef, length(paths))
     phases = similar(amps)
