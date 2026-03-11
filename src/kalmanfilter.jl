@@ -291,12 +291,14 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         Y_loc = Y(path=Index(loc_mask), field=:phase)
         y_loc = y(path=Index(loc_mask), field=:phase)
 
-        # Indices of R to be copied to R_loc depends on whether y has amp and phase measurements or just phase. 
+        # Indices of R to be copied to R_loc depends on whether R has amp and phase measurement covariances or just phase. 
         # Regardless, only phase is used to update rx_phi_offset
-        if length(y.path) == length(rx_phi_offset.path)
+        if length(R) == length(rx_phi_offset.path)
             R_loc = @views Diagonal(R[1:end][loc_mask])
-        else
+        elseif length(R) == 2*length(rx_phi_offset.path)
             R_loc = @views Diagonal(R[npaths+1:end][loc_mask])
+        else
+            error("Length of R must be equal to number of paths or twice the number of paths. Length of R: $(length(R)), number of paths: $(length(rx_phi_offset.path))")
         end
         # 4.
         C = transpose(strip(Y_loc))/R_loc
