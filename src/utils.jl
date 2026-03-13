@@ -15,6 +15,7 @@ tx_pwrs should be a slice of a KeyedArray and indexed by "pwrs = :calsign", ie t
 would return the desired new power for the NLK transmitter.
 """
 function rebuildpaths(paths, tx_pwrs)
+    #TODO Consider moving this to the RunLETKF code
     revised_paths = map(paths) do (tx, rx)
         new_tx = LongwaveModePropagator.Transmitter{VerticalDipole}(
             tx.name, tx.latitude, tx.longitude, tx.antenna, tx.frequency,

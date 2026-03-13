@@ -55,8 +55,23 @@ function LETKF_measupdate(H, xb, y, R;
 end
 
 function LETKF_measupdate(H, xb::NamedTuple, y, R;
-                          ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
+        ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), filtertype=:stacked, log10pwr_update=false, paths=nothing)
 
+    if filtertype==:stacked 
+        return LETKF_stacked_update(H, xb, y, R; ρ=ρ, localization=localization, datatypes=datatypes, log10pwr_update=log10pwr_update)
+    elseif filtertype==:dual && (haskey(xb, :tx_pwrs) || haskey(xb, :rx_phi_offset))
+        return LETKF_dual_update(H, xb, y, R; ρ=ρ, localization=localization, datatypes=datatypes, log10pwr_update=log10pwr_update)
+    elseif filtertype==:split && (haskey(xb, :tx_pwrs) || haskey(xb, :rx_phi_offset))
+        return LETKF_split_update(H, xb, y, R; ρ=ρ, localization=localization, datatypes=datatypes, log10pwr_update=log10pwr_update)
+    else
+        error("Unknown filter type: $filtertype. Currently :stacked, :dual, and :split are implemented.")
+    end
+
+end
+
+function LETKF_stacked_update(H, xb::NamedTuple, y, R;
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), log10pwr_update=false)
+    
     # 1. Compute ensemble measurements
     yb = H(xb)
     ybar = mean(yb, dims=:ens)
@@ -84,7 +99,13 @@ function LETKF_measupdate(H, xb::NamedTuple, y, R;
     end
 
     if haskey(xb, :tx_pwrs)
-        tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
+        if log10pwr_update
+            log10_tx_pwrs = log10.(xb.tx_pwrs)
+            log10_tx_pwrs_a = tx_pwrs_update(log10_tx_pwrs, y, ybar, Y, R; ρ=ρ)
+            tx_pwrs = 10 .^ log10_tx_pwrs_a
+        else
+            tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
+        end
         updated_fields = merge(updated_fields, (; tx_pwrs))
     end
 
@@ -94,6 +115,285 @@ function LETKF_measupdate(H, xb::NamedTuple, y, R;
     end
 
     return updated_fields
+end
+
+function LETKF_dual_update(H, xb::NamedTuple, y, R;
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), log10pwr_update=false)
+    
+    # 1. Compute ensemble measurements
+    yb = H(xb)
+    ybar = mean(yb, dims=:ens)
+
+    # 2. Centered measurement perturbations
+    if :amp in datatypes && :phase in datatypes
+        Y = similar(yb)
+        Y(:amp) .= yb(:amp) .- ybar(:amp)
+        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
+    elseif :amp in datatypes
+        Y = yb(:amp) .- ybar(:amp)
+    elseif :phase in datatypes
+        Y = phasediff.(yb(:phase), ybar(:phase))
+    else
+        error("Unknown datatypes: $datatypes")
+    end
+
+    # 3. Update each field if it exists, starting with the bias parameters
+    updated_fields = NamedTuple()
+    
+    if haskey(xb, :tx_pwrs)
+
+        if log10pwr_update
+            log10_tx_pwrs = log10.(xb.tx_pwrs)
+            log10_tx_pwrs_a = tx_pwrs_update(log10_tx_pwrs, y, ybar, Y, R; ρ=ρ)
+            tx_pwrs = 10 .^ log10_tx_pwrs_a
+        else
+            tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
+        end        
+        updated_fields = merge(updated_fields, (; tx_pwrs))
+
+        ## G(b): apply TX power offsets
+        for e in tx_pwrs.ens
+            for tx in tx_pwrs.pwrs
+                txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
+
+                Δpwr_log = log10(tx_pwrs(pwrs=tx, ens=e) / xb.tx_pwrs(pwrs=tx, ens=e))
+                yb(field=:amp, ens=e, path=txpaths) .+= Δpwr_log * 10  #10 dB per decade
+            end
+        end
+    end
+
+    if haskey(xb, :rx_phi_offset)
+        rx_phi_offset = rx_phi_update(xb.rx_phi_offset, y, ybar, Y, R; ρ=ρ)
+        updated_fields = merge(updated_fields, (; rx_phi_offset))
+
+        # Apply final estimated RX offsets to ym prior to measurement update for then calculating the XY update
+        for e in rx_phi_offset.ens
+            yb(field=:phase, ens=e) .+= rx_phi_offset(ens=e) .* (π/2)
+        end
+    end
+
+    # Recompute Y after applying bias updates to yb
+    ybar = mean(yb, dims=:ens)
+
+    # Centered measurement perturbations
+    if :amp in datatypes && :phase in datatypes
+        Y = similar(yb)
+        Y(:amp) .= yb(:amp) .- ybar(:amp)
+        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
+    elseif :amp in datatypes
+        Y = yb(:amp) .- ybar(:amp)
+    elseif :phase in datatypes
+        Y = phasediff.(yb(:phase), ybar(:phase))
+    else
+        error("Unknown datatypes: $datatypes")
+    end
+    
+    if haskey(xb, :xy_state)
+        xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
+            ρ=ρ, localization=localization, datatypes=datatypes)
+        updated_fields = merge(updated_fields, (; xy_state))
+    end
+
+    return updated_fields
+end
+
+
+function LETKF_split_update(H, xb::NamedTuple, y, R;
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), log10pwr_update=false)
+    
+    if !((haskey(xb, :tx_pwrs) && (:split_ens in dimnames(xb.tx_pwrs))) || (haskey(xb, :rx_phi_offset) && (:split_ens in dimnames(xb.rx_phi_offset))))
+            error("Must have split ensemble dimension in tx_pwrs or rx_phi_offset to use split update.")
+    end
+    
+    # 1. Compute ensemble measurements
+    yb = H(xb)
+    ybar = mean(yb, dims=:ens)
+
+    # 2. Centered measurement perturbations
+    if :amp in datatypes && :phase in datatypes
+        Y = similar(yb)
+        Y(:amp) .= yb(:amp) .- ybar(:amp)
+        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
+    elseif :amp in datatypes
+        Y = yb(:amp) .- ybar(:amp)
+    elseif :phase in datatypes
+        Y = phasediff.(yb(:phase), ybar(:phase))
+    else
+        error("Unknown datatypes: $datatypes")
+    end
+
+    # 3. Update each field if it exists, starting with the bias parameters
+    updated_fields = NamedTuple()
+    if haskey(xb, :tx_pwrs)
+        split_ens_size = length(xb.tx_pwrs.split_ens)
+    else
+        split_ens_size = length(xb.rx_phi_offset.split_ens)
+    end
+    pathnames=y.path
+    npaths = length(pathnames)
+    
+    if haskey(xb, :tx_pwrs) #might rename to :split_tx_pwrs or :dual_tx_pwrs
+
+        tx_pwrs = similar(xb.tx_pwrs)
+        @showprogress Threads.@threads for e in yb.ens
+            # In a parallel fashion, loop through each ensemble member of the state vector and run a full LETKF update on the bias parameters.
+            split_tx_update!(yb(ens=e), xb.tx_pwrs(ens=e), tx_pwrs(ens=e), y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
+        end
+
+        updated_fields = merge(updated_fields, (; tx_pwrs))
+
+         ## G(b): apply TX power offsets
+        for e in updated_fields.tx_pwrs.ens
+            for tx in updated_fields.tx_pwrs.pwrs
+                txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
+
+                Δpwr_log = log10(mean(updated_fields.tx_pwrs(pwrs=tx, ens=e)) / mean(xb.tx_pwrs(pwrs=tx, ens=e), dims=:split_ens)) 
+                #Updates using the mean from each split ensemble.
+                #Assumes that for the H(xb), the mean of xb.tx_pwrs was used. This should be specified in the definition of f() passed to H().
+                yb(field=:amp, ens=e, path=txpaths) .+= Δpwr_log * 10  #10 dB per decade
+            end
+        end
+    end
+
+    if haskey(xb, :rx_phi_offset)
+        rx_phi_offset = similar(xb.rx_phi_offset)
+        @showprogress Threads.@threads for e in yb.ens
+            # In a parallel fashion, loop through each ensemble member of the state vector and run a full LETKF update on the bias parameters.
+            split_rx_update!(yb(ens=e), xb.rx_phi_offset(ens=e), rx_phi_offset(ens=e), y, R, ρ, npaths, split_ens_size, pathnames)
+        end
+
+        updated_fields = merge(updated_fields, (; rx_phi_offset))
+
+        # Apply final estimated RX offsets to ym prior to measurement update for then calculating the XY update
+        for e in rx_phi_offset.ens
+            #testing slicing methods for applying mode() as it doesn't natively support applications on specific dimensions.
+            #offsets = map(p -> mode(rx_phi_offset(path=p, ens=e)), rx_phi_offset.path)
+            offsets = mode.(eachslice(rx_phi_offset(ens=e), dims=:path))
+            yb(field=:phase, ens=e) .+= offsets .* (π/2)
+            # We apply the mode as the indicator of the most likely phase offset. With modulo 4 discrete variables, where intermediate values between the integer values are meaningless, mean is not a good measure of central tendency, and mode is more appropriate. Median is interesting but likely flawed as well for circular data.
+        end
+    end
+
+    # Recompute Y after applying bias updates to yb
+    ybar = mean(yb, dims=:ens)
+
+    # Centered measurement perturbations
+    if :amp in datatypes && :phase in datatypes
+        Y = similar(yb)
+        Y(:amp) .= yb(:amp) .- ybar(:amp)
+        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
+    elseif :amp in datatypes
+        Y = yb(:amp) .- ybar(:amp)
+    elseif :phase in datatypes
+        Y = phasediff.(yb(:phase), ybar(:phase))
+    else
+        error("Unknown datatypes: $datatypes")
+    end
+    
+
+    if haskey(xb, :xy_state)
+        xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
+            ρ=ρ, localization=localization, datatypes=datatypes)
+        updated_fields = merge(updated_fields, (; xy_state))
+    end
+
+
+    return updated_fields
+end
+
+function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
+    split_yb = KeyedArray(
+        Array{Float64,3}(undef, 2, npaths, split_ens_size),
+        field = [:amp, :phase],
+        path  = pathnames,
+        ens   = 1:split_ens_size,
+    )
+
+    for ee in split_yb.ens
+        split_yb(ens=ee) .= yb #broadcast to split_ens_size
+    end
+
+    split_tx_pwrs = KeyedArray(
+        fill(NaN,2, split_ens_size), 
+        pwrs = tx_pwrs_b.pwrs, 
+        ens=1:split_ens_size
+        )
+    #needed because tx_pwrs_update requires structure with dimesion ens, not split_ens. Currently keeping both so (dual_)tx_pwrs can be mutated for all ensembles.
+
+    for ee in tx_pwrs_b.split_ens
+        for tx in tx_pwrs_b.pwrs
+            txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
+            Δpwr_log = log10(tx_pwrs_b(pwrs=tx, split_ens=ee) / mean(tx_pwrs_b(pwrs=tx), dims=:split_ens))
+            #Assumes that for the H(xb), the mean of xb.tx_pwrs was used. This should be specified in the definition of f() passed to H().
+            split_yb(field=:amp, ens=ee, path=txpaths) .+= Δpwr_log * 10  #10 dB per decade
+
+        end
+    end
+
+    split_ybar = mean(split_yb, dims=:ens)
+
+    split_Y = similar(split_yb)
+    split_Y(:amp)   .= split_yb(field=:amp) .- split_ybar(:amp)
+    split_Y(:phase) .= phasediff.(split_yb(field=:phase), split_ybar(:phase))
+
+    for tx in tx_powers_b.pwrs
+        split_tx_pwrs(pwrs=tx) .= strip(tx_powers_b(pwrs=tx)) 
+    end
+
+    if log10pwr_update
+        xnew_amp = tx_pwrs_update(log10.(split_tx_pwrs), y, split_ybar, split_Y, R; ρ = ρ)
+
+        for tx in tx_pwrs_b.pwrs
+            tx_pwrs_a(pwrs=tx) .= 10 .^(strip(xnew_amp(pwrs=tx)))
+        end
+    else
+        xnew_amp = tx_pwrs_update(split_tx_pwrs, y, split_ybar, split_Y, R; ρ = ρ)
+
+        for tx in tx_pwrs_b.pwrs
+            tx_pwrs_a(pwrs=tx) .= (strip(xnew_amp(pwrs=tx)))
+        end
+    end
+end
+
+function split_rx_update!(yb, rx_phi_offset_b, rx_phi_offset_a, y, R, ρ, npaths, split_ens_size, pathnames)
+    split_yb = KeyedArray(
+        Array{Float64,4}(undef, 2, npaths, split_ens_size),
+        field = [:amp, :phase],
+        path  = pathnames,
+        ens   = 1:split_ens_size,
+    )
+
+    for ee in split_yb.ens
+        split_yb(ens=ee) .= yb #broadcast to split_ens_size
+    end
+
+    split_rx_phi_offset = KeyedArray(
+        fill(NaN, npaths, split_ens_size), 
+        path = pathnames, 
+        ens=1:split_ens_size
+        )
+    #needed because rx_phi_offset_update requires structure with dimesion ens, not split_ens. Currently keeping both so (dual_)rx_phi_offset can be mutated for all ensembles.
+
+    for ee in rx_phi_offset_b.split_ens
+        split_yb(field=:phase, ens=ee) .+= rx_phi_offset_b(split_ens=ee) .* (π/2)
+    end
+
+    split_ybar = mean(split_yb, dims=:ens)
+
+    split_Y = similar(split_yb)
+    split_Y(:amp)   .= split_yb(field=:amp) .- split_ybar(:amp)
+    split_Y(:phase) .= phasediff.(split_yb(field=:phase), split_ybar(:phase))
+
+    for p in rx_phi_offset_b.path
+        split_rx_phi_offset(path=p) .= strip(rx_phi_offset_b(path=p)) 
+    end
+
+    xnew_phi = rx_phi_update(split_rx_phi_offset, y, split_ybar, split_Y, R; ρ = ρ)
+
+    for p in rx_phi_offset_a.path
+        rx_phi_offset_a(path=p) .= mod(round(strip(xnew_phi(path=p))), 4) #force to integer values ∈ [0, 3]
+    end
+    
 end
 
 """
@@ -370,7 +670,12 @@ function ensemble_model!(ym, f, x::NamedTuple)
 
         # Apply receiver phase offsets if present
         if haskey(x, :rx_phi_offset)
-            ym(field=:phase, ens=e) .+= x.rx_phi_offset(ens=e) .* (π/2) #implicitly, all paths must be in the same order
+            if (:split_ens in dimnames(x.rx_phi_offset))
+                offsets = mode.(eachslice(x.rx_phi_offset(ens=e), dims=:path))
+                ym(field=:phase, ens=e) .+= offsets .* (π/2)
+            else
+                ym(field=:phase, ens=e) .+= x.rx_phi_offset(ens=e) .* (π/2) #implicitly, all paths must be in the same order
+            end
         end
     end
 
