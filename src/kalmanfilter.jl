@@ -55,7 +55,7 @@ function LETKF_measupdate(H, xb, y, R;
 end
 
 function LETKF_measupdate(H, xb::NamedTuple, y, R;
-        ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), filtertype=:stacked, log10pwr_update=false, paths=nothing)
+        ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), filtertype=:stacked, log10pwr_update=false)
 
     if filtertype==:stacked 
         return LETKF_stacked_update(H, xb, y, R; ρ=ρ, localization=localization, datatypes=datatypes, log10pwr_update=log10pwr_update)
