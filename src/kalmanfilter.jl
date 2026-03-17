@@ -362,7 +362,7 @@ end
 
 function split_rx_update!(yb, rx_phi_offset_b, rx_phi_offset_a, y, R, ρ, npaths, split_ens_size, pathnames)
     split_yb = KeyedArray(
-        Array{Float64,4}(undef, 2, npaths, split_ens_size),
+        Array{Float64,3}(undef, 2, npaths, split_ens_size),
         field = [:amp, :phase],
         path  = pathnames,
         ens   = 1:split_ens_size,
