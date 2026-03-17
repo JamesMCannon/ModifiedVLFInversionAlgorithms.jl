@@ -341,8 +341,8 @@ function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_
     split_Y(:amp)   .= split_yb(field=:amp) .- split_ybar(:amp)
     split_Y(:phase) .= phasediff.(split_yb(field=:phase), split_ybar(:phase))
 
-    for tx in tx_powers_b.pwrs
-        split_tx_pwrs(pwrs=tx) .= strip(tx_powers_b(pwrs=tx)) 
+    for tx in tx_pwrs_b.pwrs
+        split_tx_pwrs(pwrs=tx) .= strip(tx_pwrs_b(pwrs=tx)) 
     end
 
     if log10pwr_update
