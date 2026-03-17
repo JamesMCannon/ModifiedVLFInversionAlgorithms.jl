@@ -396,7 +396,7 @@ function split_rx_update!(yb, rx_phi_offset_b, rx_phi_offset_a, y, R, ρ, npaths
     xnew_phi = rx_phi_update(split_rx_phi_offset, y, split_ybar, split_Y, R; ρ = ρ)
 
     for p in rx_phi_offset_a.path
-        rx_phi_offset_a(path=p) .= mod(round(strip(xnew_phi(path=p))), 4) #force to integer values ∈ [0, 3]
+        rx_phi_offset_a(path=p) .= mod.(round.(strip(xnew_phi(path=p))), 4) #force to integer values ∈ [0, 3]
     end
     
 end
