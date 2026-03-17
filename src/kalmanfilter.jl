@@ -248,7 +248,7 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
             for tx in updated_fields.tx_pwrs.pwrs
                 txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
 
-                Δpwr_log = log10(mean(updated_fields.tx_pwrs(pwrs=tx, ens=e)) / mean(xb.tx_pwrs(pwrs=tx, ens=e), dims=:split_ens)) 
+                Δpwr_log = log10(mean(updated_fields.tx_pwrs(pwrs=tx, ens=e)) / mean(xb.tx_pwrs(pwrs=tx, ens=e))) 
                 #Updates using the mean from each split ensemble.
                 #Assumes that for the H(xb), the mean of xb.tx_pwrs was used. This should be specified in the definition of f() passed to H().
                 yb(field=:amp, ens=e, path=txpaths) .+= Δpwr_log * 10  #10 dB per decade
@@ -303,6 +303,9 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
 end
 
 function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
+    
+    @assert Set(dimnames(tx_pwrs_b)) == Set((:pwrs, :split_ens))
+    #Necessary for mean in the for loop to calculate what we expect
     split_yb = KeyedArray(
         Array{Float64,3}(undef, 2, npaths, split_ens_size),
         field = [:amp, :phase],
@@ -321,10 +324,11 @@ function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_
         )
     #needed because tx_pwrs_update requires structure with dimesion ens, not split_ens. Currently keeping both so (dual_)tx_pwrs can be mutated for all ensembles.
 
-    for ee in tx_pwrs_b.split_ens
-        for tx in tx_pwrs_b.pwrs
+    for tx in tx_pwrs_b.pwrs
+        μ = mean(tx_pwrs_b(pwrs=tx), dims=:split_ens)
+        for ee in tx_pwrs_b.split_ens
             txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
-            Δpwr_log = log10(tx_pwrs_b(pwrs=tx, split_ens=ee) / mean(tx_pwrs_b(pwrs=tx), dims=:split_ens))
+            Δpwr_log = log10(tx_pwrs_b(pwrs=tx, split_ens=ee) / μ)
             #Assumes that for the H(xb), the mean of xb.tx_pwrs was used. This should be specified in the definition of f() passed to H().
             split_yb(field=:amp, ens=ee, path=txpaths) .+= Δpwr_log * 10  #10 dB per decade
 
