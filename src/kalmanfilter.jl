@@ -151,6 +151,7 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
         end        
         updated_fields = merge(updated_fields, (; tx_pwrs))
 
+        pathnames=y.path
         ## G(b): apply TX power offsets
         for e in tx_pwrs.ens
             for tx in tx_pwrs.pwrs
