@@ -567,11 +567,23 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         error("Missing entries from y.path: $(missing_paths)")
     end
 
+    if !(:field in dimnames(Y))
+        #Stacked/Dual update removes the field dimension, causing breakage here.
+        #TODO determine why this behavior changed when first adding the different filtertype functions
+        Y = KeyedArray(
+           reshape(Y, size(Y, :path), size(Y, :ens), 1);
+           path  = axiskeys(Y, :path),
+           ens   = axiskeys(Y, :ens),
+           field = [:phase]          # singleton dimension
+        )
+    end
+
     npaths = length(y.path)
     ens_size = length(rx_phi_offset.ens)
 
     # 2.
     rx_phibar = mean(rx_phi_offset,dims=:ens)
+    #Mean is just used to create a structure of the correct dimensions
 
     for p in rx_phi_offset.path
         rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
