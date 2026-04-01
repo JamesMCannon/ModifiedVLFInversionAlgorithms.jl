@@ -378,9 +378,14 @@ function split_rx_update!(yb, rx_phi_offset_b, rx_phi_offset_a, y, R, ρ, npaths
         ens=1:split_ens_size
         )
     #needed because rx_phi_offset_update requires structure with dimesion ens, not split_ens. Currently keeping both so (dual_)rx_phi_offset can be mutated for all ensembles.
+    # Compute mode per path before the perturbation loop
+    # We use the mode here because ensemble_model!() uses the mode when computing the modeled measurements.
+    # This means we have to use deviation from the mode when calculating the Y matrix for the LETKF update.
+    mode_offset = mode.(eachslice(rx_phi_offset_b, dims=:path))
 
     for ee in rx_phi_offset_b.split_ens
-        split_yb(field=:phase, ens=ee) .+= rx_phi_offset_b(split_ens=ee) .* (π/2)
+        split_yb(field=:phase, ens=ee) .+= 
+            circular_diff.(rx_phi_offset_b(split_ens=ee), mode_offset) .* (π/2)
     end
 
     split_ybar = mean(split_yb, dims=:ens)
