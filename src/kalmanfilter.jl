@@ -505,6 +505,17 @@ end
 """
 function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1)
     
+    if !(:field in dimnames(Y))
+        #Stacked/Dual update removes the field dimension, causing breakage here.
+        #TODO determine why this behavior changed when first adding the different filtertype functions
+        Y = KeyedArray(
+            reshape(Y, size(Y, :path), size(Y, :ens), 1);
+            path  = axiskeys(Y, :path),
+            ens   = axiskeys(Y, :ens),
+            field = [:amp]          # singleton dimension
+        )
+    end
+    
     npaths = length(y.path)
     ens_size = length(tx_pwrs.ens)
     num_txs = length(tx_pwrs.pwrs)
