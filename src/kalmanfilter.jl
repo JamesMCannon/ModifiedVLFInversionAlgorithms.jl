@@ -400,10 +400,6 @@ function split_rx_update!(yb, rx_phi_offset_b, rx_phi_offset_a, y, R, ρ, npaths
 
     xnew_phi = rx_phi_update(split_rx_phi_offset, y, split_ybar, split_Y, R; ρ = ρ)
 
-    # Diagnostic
-    delta_phi = strip(xnew_phi) .- strip(split_rx_phi_offset)
-    println("split_rx update magnitude: max_shift=$(maximum(abs.(delta_phi))), mean_shift=$(mean(abs.(delta_phi)))")
-
     for p in rx_phi_offset_a.path
         rx_phi_offset_a(path=p) .= mod.(round.(strip(xnew_phi(path=p))), 4) #force to integer values ∈ [0, 3]
     end
@@ -606,7 +602,8 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
     #Mean is just used to create a structure of the correct dimensions
 
     for p in rx_phi_offset.path
-        rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
+        #rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
+        rx_phibar(path=p).= mode(rx_phi_offset(path=p))
     end
 
     Xrx_phi = similar(rx_phi_offset)
