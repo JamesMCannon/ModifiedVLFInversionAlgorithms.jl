@@ -258,7 +258,7 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
 
     if haskey(xb, :rx_phi_offset)
         rx_phi_offset = similar(xb.rx_phi_offset)
-        @showprogress Threads.@threads for e in yb.ens
+        #=@showprogress Threads.@threads=# for e in yb.ens
             # In a parallel fashion, loop through each ensemble member of the state vector and run a full LETKF update on the bias parameters.
             split_rx_update!(yb(ens=e), xb.rx_phi_offset(ens=e), rx_phi_offset(ens=e), y, R, ρ, npaths, split_ens_size, pathnames)
         end
@@ -400,6 +400,10 @@ function split_rx_update!(yb, rx_phi_offset_b, rx_phi_offset_a, y, R, ρ, npaths
 
     xnew_phi = rx_phi_update(split_rx_phi_offset, y, split_ybar, split_Y, R; ρ = ρ)
 
+    # Diagnostic
+    delta_phi = strip(xnew_phi) .- strip(split_rx_phi_offset)
+    println("split_rx update magnitude: max_shift=$(maximum(abs.(delta_phi))), mean_shift=$(mean(abs.(delta_phi)))")
+
     for p in rx_phi_offset_a.path
         rx_phi_offset_a(path=p) .= mod.(round.(strip(xnew_phi(path=p))), 4) #force to integer values ∈ [0, 3]
     end
@@ -515,7 +519,7 @@ function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1)
             field = [:amp]          # singleton dimension
         )
     end
-    
+
     npaths = length(y.path)
     ens_size = length(tx_pwrs.ens)
     num_txs = length(tx_pwrs.pwrs)
