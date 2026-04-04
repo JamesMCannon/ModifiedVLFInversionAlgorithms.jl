@@ -50,6 +50,23 @@ function phasediff(a, b; deg=false)
 
     return d
 end
+
+function circular_center(vals; period=4, threshold=0.15)
+    # Compute resultant length to detect uniform vs concentrated
+    θ = vals .* (2π / period)
+    R = sqrt(mean(cos, θ)^2 + mean(sin, θ)^2)
+    
+    if R > threshold
+        # Distribution has clear directionality — circular_mean is well-defined
+        return circular_mean(vals, period=period)
+    else
+        # Near-uniform — circular_mean is noise, mode zeroes out members
+        # Arithmetic mean gives balanced nonzero perturbations
+        # and for near-uniform distributions, perturbation sum ≈ 0
+        return mean(vals)
+    end
+end
+
 """
     circular_mean(x; period=4)
 Compute the circular mean of `x` with given `period`.

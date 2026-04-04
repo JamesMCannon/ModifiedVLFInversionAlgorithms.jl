@@ -603,7 +603,8 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
 
     for p in rx_phi_offset.path
         #rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
-        rx_phibar(path=p).= mode(rx_phi_offset(path=p))
+        rx_phibar(path=p).= mean(rx_phi_offset(path=p))
+        #rx_phibar(path=p).= mode(rx_phi_offset(path=p))
     end
 
     Xrx_phi = similar(rx_phi_offset)
