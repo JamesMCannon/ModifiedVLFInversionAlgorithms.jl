@@ -602,14 +602,21 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
     #Mean is just used to create a structure of the correct dimensions
 
     for p in rx_phi_offset.path
-        rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
+        #rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
         #rx_phibar(path=p) .= mean(rx_phi_offset(path=p))
         #rx_phibar(path=p).= mode(rx_phi_offset(path=p))
+
+        center = mean(rx_phi_offset(path=p))
+        perturbs = circular_diff.(rx_phi_offset(path=p), center)
+        correction = mean(perturbs)
+        rx_phibar(path=p) .= center + correction
     end
 
     Xrx_phi = similar(rx_phi_offset)
     for e in rx_phi_offset.ens
-        Xrx_phi(ens=e) .= dropdims(circular_diff.(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
+        perturbs = circular_diff.(rx_phi_offset(ens=e), dropdims(rx_phibar, dims=:ens))
+        Xrx_phi(ens=e) .= perturbs .- mean(perturbs) 
+        #Xrx_phi(ens=e) .= dropdims(circular_diff.(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
     end
 
     #For localizing RX phase offset state variable, we consider only phase data 
