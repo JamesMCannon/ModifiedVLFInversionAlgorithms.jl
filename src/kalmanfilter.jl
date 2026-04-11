@@ -598,6 +598,14 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
     ens_size = length(rx_phi_offset.ens)
 
     # 2.
+    θ = rx_phi_offset .* (π/2)
+    zc = cos.(θ)
+    zs = sin.(θ)
+    zbar_c = mean(zc, dims=:ens)
+    zbar_s = mean(zs, dims=:ens)
+    Xc = zc .- zbar_c
+    Xs = zs .- zbar_s
+    #=
     rx_phibar = mean(rx_phi_offset,dims=:ens)
     #Mean is just used to create a structure of the correct dimensions
 
@@ -605,12 +613,12 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
         #rx_phibar(path=p) .= mean(rx_phi_offset(path=p))
         #rx_phibar(path=p).= mode(rx_phi_offset(path=p))
-#=
+        #=
         center = mean(rx_phi_offset(path=p))
         perturbs = circular_diff.(rx_phi_offset(path=p), center)
         correction = mean(perturbs)
         rx_phibar(path=p) .= center + correction
-=#
+        =#
     end
 
     Xrx_phi = similar(rx_phi_offset)
@@ -620,6 +628,7 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         #Xrx_phi(ens=e) .= dropdims(circular_diff.(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
         Xrx_phi(ens=e) .= dropdims(balanced_circular_diff(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
     end
+    =#
 
     #For localizing RX phase offset state variable, we consider only phase data 
     #from the current path.
@@ -662,10 +671,23 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         wa = Wa .+ wabar
 
         # 8.
+        #=
         rx_phibar_loc = rx_phibar(path = p_string)
         Xrx_phi_loc = transpose(Xrx_phi(path = p_string, ens = Index(Xrx_phi.ens))) # Transpose necessary because Julia flattens 1xk to (k,)
 
         rx_phi_offset_a(path = p_string) .= transpose(parent(parent(Xrx_phi_loc*wa .+ rx_phibar_loc)))
+        =#
+        # Stack (cos, sin) rows for this path; shape (2, ens_size)
+        Xloc_c = transpose(parent(parent(Xc(path=p_string))))
+        Xloc_s = transpose(parent(parent(Xs(path=p_string))))
+        X2 = vcat(Xloc_c, Xloc_s)          # 2 × ens_size
+
+        zbar2 = zbar2 = [only(zbar_c(path=p_string)); only(zbar_s(path=p_string))]
+        z_a = X2*wa .+ zbar2               # 2 × ens_size (one column per member)
+
+        # Project back: angle → quarter-turn count in [0,4). Downstream `round`+`mod 4` snaps to {0,1,2,3}.
+        θa = atan.(z_a[2,:], z_a[1,:])
+        rx_phi_offset_a(path=p_string) .= mod.(θa ./ (π/2), 4)
     end
 
     return rx_phi_offset_a
