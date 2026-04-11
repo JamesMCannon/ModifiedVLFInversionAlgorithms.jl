@@ -90,6 +90,35 @@ function circular_diff(b, a; period=4)
 end
 
 """
+    balanced_circular_diff(vals, center; period=4, tol=1e-9)
+ 
+Compute `circular_diff.(vals, center)` with a rebalancing pass over members
+on the exact antipode. The naive formula places all antipodal members at the
+same sign (`-period/2` under Julia's `mod`), which biases their contribution
+to Σpert when the cluster is large. This function assigns alternating signs
+across the antipodal group; odd counts leave one stray `±period/2` whose
+sign is chosen to minimize the residual.
+ 
+Antipodes are detected by magnitude (`|p| ≈ period/2`), making the routine
+robust to the underlying modulo convention.
+"""
+function balanced_circular_diff(vals, center; period=4, tol=1e-9)
+    perturbs = circular_diff.(vals, center; period)
+    half = period / 2
+    anti_idx = findall(p -> abs(abs(p) - half) < tol, perturbs)
+    for (k, i) in enumerate(anti_idx)
+        perturbs[i] = isodd(k) ? +half : -half
+    end
+    if isodd(length(anti_idx))
+        non_anti_sum = sum(perturbs) - half
+        if abs(non_anti_sum - half) < abs(non_anti_sum + half)
+            perturbs[anti_idx[end]] = -half
+        end
+    end
+    return perturbs
+end
+
+"""
     strip(m::KeyedArray)
     strip(m::NamedDimsArray)
 

@@ -617,7 +617,8 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
     for e in rx_phi_offset.ens
         #perturbs = circular_diff.(rx_phi_offset(ens=e), dropdims(rx_phibar, dims=:ens))
         #Xrx_phi(ens=e) .= perturbs .- mean(perturbs) 
-        Xrx_phi(ens=e) .= dropdims(circular_diff.(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
+        #Xrx_phi(ens=e) .= dropdims(circular_diff.(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
+        Xrx_phi(ens=e) .= dropdims(balanced_circular_diff(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
     end
 
     #For localizing RX phase offset state variable, we consider only phase data 
