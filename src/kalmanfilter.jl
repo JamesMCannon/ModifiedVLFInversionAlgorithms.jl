@@ -169,7 +169,7 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
 
         # Apply final estimated RX offsets to ym prior to measurement update for then calculating the XY update
         for e in rx_phi_offset.ens
-            yb(field=:phase, ens=e) .+= rx_phi_offset(ens=e) .* (π/2)
+            yb(field=:phase, ens=e) .+= circular_diff.(rx_phi_offset(ens=e), xb.rx_phi_offset(ens=e)) .* (π/2)
         end
     end
 
@@ -267,11 +267,12 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
 
         # Apply final estimated RX offsets to ym prior to measurement update for then calculating the XY update
         for e in rx_phi_offset.ens
-            #testing slicing methods for applying mode() as it doesn't natively support applications on specific dimensions.
-            #offsets = map(p -> mode(rx_phi_offset(path=p, ens=e)), rx_phi_offset.path)
-            offsets = mode.(eachslice(rx_phi_offset(ens=e), dims=:path))
-            yb(field=:phase, ens=e) .+= offsets .* (π/2)
-            # We apply the mode as the indicator of the most likely phase offset. With modulo 4 discrete variables, where intermediate values between the integer values are meaningless, mean is not a good measure of central tendency, and mode is more appropriate. Median is interesting but likely flawed as well for circular data.
+            new_offsets = mode.(eachslice(rx_phi_offset(ens=e), dims=:path))
+            old_offsets = mode.(eachslice(xb.rx_phi_offset(ens=e), dims=:path))
+            yb(field=:phase, ens=e) .+= circular_diff.(new_offsets, old_offsets) .* (π/2)
+            # We apply the mode, subtracting the offsets already applied in ensemble_model, as the indicator of the most likely phase offset.
+            # With modulo 4 discrete variables, where intermediate values between the integer values are meaningless, 
+            # mean is not a good measure of central tendency, and mode is more appropriate. 
         end
     end
 
@@ -682,7 +683,7 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
         Xloc_s = transpose(parent(parent(Xs(path=p_string))))
         X2 = vcat(Xloc_c, Xloc_s)          # 2 × ens_size
 
-        zbar2 = zbar2 = [only(zbar_c(path=p_string)); only(zbar_s(path=p_string))]
+        zbar2 = [only(zbar_c(path=p_string)); only(zbar_s(path=p_string))]
         z_a = X2*wa .+ zbar2               # 2 × ens_size (one column per member)
 
         # Project back: angle → quarter-turn count in [0,4). Downstream `round`+`mod 4` snaps to {0,1,2,3}.
