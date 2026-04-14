@@ -226,7 +226,7 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
  
     # 3. xy_state update on the bias-corrected yb (ybar/Y recomputed inside)
     if haskey(xb, :xy_state)
-        xy_state = xy_update_only(yb, xb.xy_state, y, R;
+        xy_state = xy_only_update(yb, xb.xy_state, y, R;
             ρ=ρ, localization=localization, datatypes=datatypes)
         updated_fields = merge(updated_fields, (; xy_state))
     end
@@ -325,12 +325,12 @@ end
  
  
 """
-    xy_update_only(yb, xy_state, y, R; ρ, localization, datatypes) → xy_state_a
+    xy_only_update(yb, xy_state, y, R; ρ, localization, datatypes) → xy_state_a
  
 Perform only the spatial (xy_state) LETKF update given an already-bias-corrected
 ensemble prediction `yb`.  No forward-model call is made.
 """
-function xy_update_only(yb, xy_state, y, R;
+function xy_only_update(yb, xy_state, y, R;
     ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
  
     ybar = mean(yb, dims=:ens)
@@ -344,7 +344,7 @@ function xy_update_only(yb, xy_state, y, R;
     elseif :phase in datatypes
         Y = phasediff.(yb(:phase), ybar(:phase))
     else
-        error("xy_update_only: unknown datatypes $datatypes")
+        error("xy_only_update: unknown datatypes $datatypes")
     end
  
     return xy_state_update(xy_state, y, ybar, Y, R;
