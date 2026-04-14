@@ -205,81 +205,136 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
     if !((haskey(xb, :tx_pwrs) && (:split_ens in dimnames(xb.tx_pwrs))) || (haskey(xb, :rx_phi_offset) && (:split_ens in dimnames(xb.rx_phi_offset))))
             error("Must have split ensemble dimension in tx_pwrs or rx_phi_offset to use split update.")
     end
-    
-    # 1. Compute ensemble measurements
+ 
+    # 1. Run forward model once
     yb = H(xb)
-    ybar = mean(yb, dims=:ens)
-
-    # 2. Centered measurement perturbations
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
-        Y(:amp) .= yb(:amp) .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
-    else
-        error("Unknown datatypes: $datatypes")
-    end
-
-    # 3. Update each field if it exists, starting with the bias parameters
+ 
+    # 2. Bias-only update (TX amplitude, then RX phase); yb corrected in-place
+    tx_prior = haskey(xb, :tx_pwrs)       ? xb.tx_pwrs       : nothing
+    rx_prior = haskey(xb, :rx_phi_offset) ? xb.rx_phi_offset : nothing
+ 
+    new_tx_pwrs, new_rx_phi_offset = bias_only_update!(yb, tx_prior, rx_prior, y, R;
+        ρ=ρ, log10pwr_update=log10pwr_update)
+ 
     updated_fields = NamedTuple()
-    if haskey(xb, :tx_pwrs)
-        split_ens_size = length(xb.tx_pwrs.split_ens)
-    else
-        split_ens_size = length(xb.rx_phi_offset.split_ens)
+    if !isnothing(new_tx_pwrs)
+        updated_fields = merge(updated_fields, (; tx_pwrs=new_tx_pwrs))
     end
-    pathnames=y.path
+    if !isnothing(new_rx_phi_offset)
+        updated_fields = merge(updated_fields, (; rx_phi_offset=new_rx_phi_offset))
+    end
+ 
+    # 3. xy_state update on the bias-corrected yb (ybar/Y recomputed inside)
+    if haskey(xb, :xy_state)
+        xy_state = xy_update_only(yb, xb.xy_state, y, R;
+            ρ=ρ, localization=localization, datatypes=datatypes)
+        updated_fields = merge(updated_fields, (; xy_state))
+    end
+ 
+    return updated_fields
+end
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# Windowed pre-update helpers
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+"""
+    bias_only_update!(yb, tx_pwrs, rx_phi_offset, y, R; ρ, log10pwr_update)
+ 
+Perform only the TX-power and RX-phase-offset LETKF updates from `LETKF_split_update`,
+then immediately apply the resulting corrections back into `yb` so that accumulated
+bias estimates are reflected in the ensemble predictions before the next window step.
+ 
+# Arguments
+- `yb`: ensemble prediction array `(field, path, ens)` — **mutated in-place**.
+- `tx_pwrs`: current TX-power prior with dims `(pwrs, ens, split_ens)`, or `nothing`.
+- `rx_phi_offset`: current RX-phase-offset prior with dims `(path, ens, split_ens)`, or `nothing`.
+- `y`: observed data for this window step.
+- `R`: diagonal observation-noise variance vector.
+ 
+Returns `(new_tx_pwrs, new_rx_phi_offset)` — refined bias estimates to be used as the
+prior for the next window iteration.  Either return value is `nothing` when the
+corresponding statetype is absent.
+ 
+# Design notes
+- TX updates consume only amplitude data; RX updates consume only phase data.
+  The two updates are therefore independent and can be applied in either order.
+- The yb correction for TX is the log-power change (in dB) relative to the prior mean.
+- The yb correction for RX is the circular change in mode offset (in radians).
+- Calling this function N times with successive observations accumulates corrections
+  that telescope to `log10(mean(tx_N)/mean(tx_0))*10` — identical to a single step
+  applied with the final estimate.
+"""
+function bias_only_update!(yb, tx_pwrs, rx_phi_offset, y, R; ρ=1.1, log10pwr_update=false)
+ 
+    pathnames = y.path
     npaths = length(pathnames)
-    
-    if haskey(xb, :tx_pwrs) #might rename to :split_tx_pwrs or :dual_tx_pwrs
-
-        tx_pwrs = similar(xb.tx_pwrs)
+ 
+    if !isnothing(tx_pwrs) && :split_ens in dimnames(tx_pwrs)
+        split_ens_size = length(tx_pwrs.split_ens)
+    elseif !isnothing(rx_phi_offset) && :split_ens in dimnames(rx_phi_offset)
+        split_ens_size = length(rx_phi_offset.split_ens)
+    else
+        error("bias_only_update!: tx_pwrs or rx_phi_offset must contain a :split_ens dimension")
+    end
+ 
+    new_tx_pwrs = nothing
+    new_rx_phi_offset = nothing
+ 
+    # ── TX power update (amplitude data only) ────────────────────────────────
+    if !isnothing(tx_pwrs)
+        new_tx_pwrs = similar(tx_pwrs)
         @showprogress Threads.@threads for e in yb.ens
-            # In a parallel fashion, loop through each ensemble member of the state vector and run a full LETKF update on the bias parameters.
-            split_tx_update!(yb(ens=e), xb.tx_pwrs(ens=e), tx_pwrs(ens=e), y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
+            split_tx_update!(yb(ens=e), tx_pwrs(ens=e), new_tx_pwrs(ens=e),
+                             y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
         end
-
-        updated_fields = merge(updated_fields, (; tx_pwrs))
-
-         ## G(b): apply TX power offsets
-        for e in updated_fields.tx_pwrs.ens
-            for tx in updated_fields.tx_pwrs.pwrs
-                txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
-
-                Δpwr_log = log10(mean(updated_fields.tx_pwrs(pwrs=tx, ens=e)) / mean(xb.tx_pwrs(pwrs=tx, ens=e))) 
-                #Updates using the mean from each split ensemble.
-                #Assumes that for the H(xb), the mean of xb.tx_pwrs was used. This should be specified in the definition of f() passed to H().
-                yb(field=:amp, ens=e, path=txpaths) .+= Δpwr_log * 10  #10 dB per decade
+ 
+        # Accumulate amplitude correction: Δ = change in mean log-power per TX
+        for e in new_tx_pwrs.ens
+            for tx in new_tx_pwrs.pwrs
+                txpaths  = pathnames[startswith.(pathnames, String(tx) * "-")]
+                Δpwr_log = log10(mean(new_tx_pwrs(pwrs=tx, ens=e)) /
+                                 mean(tx_pwrs(pwrs=tx, ens=e)))
+                yb(field=:amp, ens=e, path=txpaths) .+= Δpwr_log * 10  # 10 dB/decade
             end
         end
     end
-
-    if haskey(xb, :rx_phi_offset)
-        rx_phi_offset = similar(xb.rx_phi_offset)
-        #=@showprogress Threads.@threads=# for e in yb.ens
-            # In a parallel fashion, loop through each ensemble member of the state vector and run a full LETKF update on the bias parameters.
-            split_rx_update!(yb(ens=e), xb.rx_phi_offset(ens=e), rx_phi_offset(ens=e), y, R, ρ, npaths, split_ens_size, pathnames)
+ 
+    # ── RX phase-offset update (phase data only) ─────────────────────────────
+    if !isnothing(rx_phi_offset)
+        new_rx_phi_offset = similar(rx_phi_offset)
+        @showprogress Threads.@threads for e in yb.ens
+            split_rx_update!(yb(ens=e), rx_phi_offset(ens=e), new_rx_phi_offset(ens=e),
+                             y, R, ρ, npaths, split_ens_size, pathnames)
         end
-
-        updated_fields = merge(updated_fields, (; rx_phi_offset))
-
-        # Apply final estimated RX offsets to ym prior to measurement update for then calculating the XY update
-        for e in rx_phi_offset.ens
-            new_offsets = mode.(eachslice(rx_phi_offset(ens=e), dims=:path))
-            old_offsets = mode.(eachslice(xb.rx_phi_offset(ens=e), dims=:path))
+ 
+        # Accumulate phase correction: Δ = change in mode offset per path (quarter-turns → radians)
+        for e in new_rx_phi_offset.ens
+            new_offsets = mode.(eachslice(new_rx_phi_offset(ens=e), dims=:path))
+            old_offsets = mode.(eachslice(rx_phi_offset(ens=e), dims=:path))
             yb(field=:phase, ens=e) .+= circular_diff.(new_offsets, old_offsets) .* (π/2)
             # We apply the mode, subtracting the offsets already applied in ensemble_model, as the indicator of the most likely phase offset.
             # With modulo 4 discrete variables, where intermediate values between the integer values are meaningless, 
             # mean is not a good measure of central tendency, and mode is more appropriate. 
         end
     end
-
-    # Recompute Y after applying bias updates to yb
+ 
+    return new_tx_pwrs, new_rx_phi_offset
+end
+ 
+ 
+"""
+    xy_update_only(yb, xy_state, y, R; ρ, localization, datatypes) → xy_state_a
+ 
+Perform only the spatial (xy_state) LETKF update given an already-bias-corrected
+ensemble prediction `yb`.  No forward-model call is made.
+"""
+function xy_update_only(yb, xy_state, y, R;
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
+ 
     ybar = mean(yb, dims=:ens)
-
-    # Centered measurement perturbations
+ 
     if :amp in datatypes && :phase in datatypes
         Y = similar(yb)
         Y(:amp) .= yb(:amp) .- ybar(:amp)
@@ -289,19 +344,13 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
     elseif :phase in datatypes
         Y = phasediff.(yb(:phase), ybar(:phase))
     else
-        error("Unknown datatypes: $datatypes")
+        error("xy_update_only: unknown datatypes $datatypes")
     end
-    
-
-    if haskey(xb, :xy_state)
-        xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
-            ρ=ρ, localization=localization, datatypes=datatypes)
-        updated_fields = merge(updated_fields, (; xy_state))
-    end
-
-
-    return updated_fields
+ 
+    return xy_state_update(xy_state, y, ybar, Y, R;
+        ρ=ρ, localization=localization, datatypes=datatypes)
 end
+ 
 
 function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
     
