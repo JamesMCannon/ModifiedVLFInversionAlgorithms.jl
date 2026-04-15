@@ -743,6 +743,160 @@ function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
     return rx_phi_offset_a
 end
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Categorical RX-offset update path
+#
+# Alternative to `rx_phi_update` for the discrete MSK-ambiguity case where
+# k_p ∈ {0,1,2,3} is constant in time. Maintains a per-path log-posterior and
+# accumulates evidence across iterations. See `runletkf` `:categorical` branch.
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4)
+        → log_post (mutated)
+
+Accumulate Bayesian evidence into the per-path log-posterior `log_post`
+(`KeyedArray` with dims `path × k`, where `k = 0:period-1`) given the current
+ensemble forward-model output `yb`, the per-member offsets that were applied
+inside the forward model `current_offsets` (`KeyedArray(path, ens)`), the
+observation `y` for this iteration, and the diagonal observation-noise vector
+`R`.
+
+# Recovery of offset-free `yb`
+`ensemble_model!` adds `current_offsets(path=p, ens=e) * (π/2)` to
+`yb(:phase, path=p, ens=e)` before this function sees it. To compute the
+likelihood of each candidate `k`, we need the raw forward-model output. We
+recover it on the fly by subtracting `current_offsets * (π/2)` per member.
+This avoids a duplicate forward-model call.
+
+# Posterior accumulation
+`k_p` is constant in time (MSK ambiguity is fixed at receiver lock per
+preprocessing assumption), so iteration `t`'s posterior is
+
+    log_post_t(k) = log_post_{t-1}(k) + ℓ_t(k)
+
+where `ℓ_t(k)` is the marginal log-likelihood from `rx_phi_loglikelihood`.
+Normalization is applied lazily — `log_post` accumulates as raw log-likelihoods,
+and consumers (`rx_phi_posterior`, `rx_phi_sample`) normalize on read.
+
+# `R` handling
+Same convention as `rx_phi_update`: `R` may be length `npaths` (phase only) or
+`2*npaths` (amp first, then phase). Phase variances are the second half in the
+combined case. Each path uses its own σ².
+"""
+function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4)
+    npaths = length(yb.path)
+    quarter = π / (period / 2)  # = π/2 for period=4
+
+    # Fail loud if path orderings ever diverge across the three KeyedArrays
+    @assert axiskeys(yb, :path) == axiskeys(current_offsets, :path) == axiskeys(log_post, :path) ==
+            axiskeys(y, :path) "categorical_rx_update!: :path axis mismatch across yb / current_offsets / log_post / y"
+
+    # Locate phase variances in R
+    if length(R) == npaths
+        R_phase = R
+    elseif length(R) == 2*npaths
+        R_phase = R[npaths+1:end]
+    else
+        error("categorical_rx_update!: length(R) = $(length(R)) does not match $npaths or 2·$npaths")
+    end
+
+    for (n, p) in enumerate(yb.path)
+        σ² = R_phase[n]
+
+        # Recover offset-free per-member modeled phases for this path.
+        # parent(...) drops the KeyedArray wrapper so positional indexing is unambiguous.
+        yb_path     = parent(parent(yb(field=:phase, path=p)))      # length-ens_size Vector{Float64}
+        offsets_vec = parent(parent(current_offsets(path=p)))       # length-ens_size Vector{Float64}
+        y_phase_p   = only(y(field=:phase, path=p))                 # scalar observation
+
+        ens_size = length(yb_path)
+        yb_raw = [yb_path[e] - offsets_vec[e]*quarter for e in 1:ens_size]
+
+        ℓ = rx_phi_loglikelihood(yb_raw, y_phase_p, σ²; period=period)
+
+        # Accumulate (constant k_p ⇒ no forgetting factor)
+        for k in 0:period-1
+            log_post(path=p, k=k) .+= ℓ[k+1]
+        end
+    end
+
+    return log_post
+end
+
+
+"""
+    ensemble_model!(ym, f, x::NamedTuple, rx_log_post, rng)
+
+Categorical-path variant of `ensemble_model!`. Identical to the standard
+`NamedTuple` method except that the per-member rx offset added to `ym(:phase)`
+is **sampled from the current per-path posterior** `rx_log_post` rather than
+read from `x.rx_phi_offset` directly.
+
+This implements the marginalization-over-k step: each ensemble member of
+`xy_state` is paired with an independently-drawn `k_p` per path, so the
+ensemble of modeled phases honestly represents joint uncertainty in `(x, k)`.
+The drawn offsets are written into `x.rx_phi_offset(ens=e)` so that downstream
+consumers (saving, heatmaps, the next iteration's `categorical_rx_update!`)
+see a consistent record of what was actually used.
+
+`x.rx_phi_offset` is expected to have dims `(path, ens)` — the categorical
+path does not use the `:split_ens` dimension.
+"""
+function ensemble_model!(ym, f, x::NamedTuple, rx_log_post, rng; commit_threshold=1.0)
+    haskey(x, :rx_phi_offset) ||
+        error("ensemble_model! categorical variant requires x.rx_phi_offset")
+    :split_ens in dimnames(x.rx_phi_offset) &&
+        error("ensemble_model! categorical variant does not support :split_ens dimension")
+
+    npaths = length(x.rx_phi_offset.path)
+    ens_size = length(x.xy_state.ens)
+
+    # Per-path: sample if posterior is uncertain, deterministically use MAP if it
+    # exceeds `commit_threshold`. Pre-build the (path × ens) offset matrix so the
+    # threaded forward-model loop never touches `rng`.
+    sampled = Matrix{Float64}(undef, npaths, ens_size)
+    for (n, p) in enumerate(x.rx_phi_offset.path)
+        log_post_p = collect(rx_log_post(path=p))
+        post_p = rx_phi_posterior(log_post_p)
+        max_p, k_map = findmax(post_p)
+        if max_p ≥ commit_threshold
+            # Confident path: every member gets the same MAP k. Collapses phase
+            # spread for the downstream xy_state LETKF update.
+            sampled[n, :] .= k_map - 1   # findmax returns 1-based index
+        else
+            sampled[n, :] .= rx_phi_sample(log_post_p, ens_size, rng)
+        end
+    end
+    for e in 1:ens_size
+        x.rx_phi_offset(ens=e) .= view(sampled, :, e)
+    end
+
+    @showprogress Threads.@threads for e in x.xy_state.ens
+        xy_state = x.xy_state(ens=e)
+
+        ens_state = NamedTuple()
+        ens_state = merge(ens_state, (; xy_state))
+        if haskey(x, :tx_pwrs)
+            tx_pwrs = x.tx_pwrs(ens=e)
+            ens_state = merge(ens_state, (; tx_pwrs))
+        end
+
+        a, p = f(ens_state)
+        ym(:amp)(ens=e) .= a
+        ym(:phase)(ens=e) .= p
+
+        # Apply the per-member sampled offsets for this iteration
+        ym(field=:phase, ens=e) .+= x.rx_phi_offset(ens=e) .* (π/2)
+    end
+
+    for pth in ym.path
+        ym(:phase)(path=pth) .= modgaussian(ym(:phase)(path=pth))
+    end
+
+    return ym
+end
+
 """
     ensemble_model!(ym, f, x)
 

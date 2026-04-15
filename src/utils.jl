@@ -118,6 +118,105 @@ function balanced_circular_diff(vals, center; period=4, tol=1e-9)
     return perturbs
 end
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Categorical RX-offset inference helpers
+#
+# These support the alternate `rx_method=:categorical` path in runletkf, which
+# treats `rx_phi_offset` as a per-path categorical k_p ∈ {0,1,2,3} representing
+# the MSK 90° demodulation ambiguity rather than as a continuous LETKF state.
+# Pure functions only — no dependency on filter loop state.
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    logsumexp(x)
+
+Numerically stable `log(sum(exp.(x)))` for any iterable `x`. Two-pass: one to
+find the max, one to accumulate. Generator-safe — does not require `x` to be
+indexable. Returns `-Inf` if all elements are `-Inf`.
+"""
+function logsumexp(x)
+    m = -Inf
+    for xi in x
+        xi > m && (m = xi)
+    end
+    isfinite(m) || return m
+    s = 0.0
+    for xi in x
+        s += exp(xi - m)
+    end
+    return m + log(s)
+end
+
+"""
+    rx_phi_loglikelihood(yb_phase_path::AbstractVector, y_phase_path::Real, σ²; period=4)
+        → Vector{Float64} of length `period`
+
+For a single path, given the ensemble of modeled phases `yb_phase_path`
+(length `ens_size`, *without* any rx offset baked in — see note), the scalar
+observed phase `y_phase_path`, and observation variance `σ²`, return the
+log-likelihood of each candidate offset `k ∈ 0:period-1` after marginalizing
+over the ensemble.
+
+The marginalization is
+
+    ℓ(k) = log( (1/N) · Σ_e exp[ -½ · phasediff(y, yb_e + k·π/2)² / σ² ] )
+
+i.e. logsumexp over members of the per-member Gaussian log-likelihood, minus
+log(N). The minus-log(N) is a `k`-independent constant that drops out of the
+posterior after normalization, so it can safely be omitted; we keep it so the
+returned numbers are interpretable as honest log-likelihoods.
+
+# Note on `yb_phase_path`
+This expects `yb` *without* the current ensemble's rx-offset contribution mixed
+in — i.e. the raw forward-model output for this path. If the calling site has
+`yb` with offsets already added (as `ensemble_model!` does in the categorical
+path), it must subtract them before calling this function. See
+`categorical_rx_update!` for the canonical usage.
+"""
+function rx_phi_loglikelihood(yb_phase_path, y_phase_path, σ²; period=4)
+    ℓ = Vector{Float64}(undef, period)
+    N = length(yb_phase_path)
+    invN_log = -log(N)
+    quarter = π / (period / 2)  # = π/2 for period=4
+    for k in 0:period-1
+        offset_rad = k * quarter
+        ℓ[k+1] = invN_log + logsumexp(
+            -0.5 * phasediff(y_phase_path, yb_e + offset_rad)^2 / σ²
+            for yb_e in yb_phase_path
+        )
+    end
+    return ℓ
+end
+
+"""
+    rx_phi_sample(log_post_path, n, rng; period=4)
+        → Vector{Int} of length `n`, values in `0:period-1`
+
+Sample `n` integer offsets independently from the categorical posterior whose
+unnormalized log-probabilities are `log_post_path` (length `period`). Used by
+the categorical-path `ensemble_model!` to assign a per-member offset that
+honestly represents the current uncertainty in `k_p`.
+"""
+function rx_phi_sample(log_post_path, n, rng; period=4)
+    m = maximum(log_post_path)
+    w = exp.(log_post_path .- m)
+    w ./= sum(w)
+    return [sample(rng, 0:period-1, Weights(w)) for _ in 1:n]
+end
+
+"""
+    rx_phi_posterior(log_post_path) → Vector{Float64}
+
+Normalize unnormalized log-posterior `log_post_path` to a probability vector
+summing to 1. Convenience for diagnostics and heatmap generation.
+"""
+function rx_phi_posterior(log_post_path)
+    m = maximum(log_post_path)
+    w = exp.(log_post_path .- m)
+    return w ./ sum(w)
+end
+
+
 """
     strip(m::KeyedArray)
     strip(m::NamedDimsArray)
