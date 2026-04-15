@@ -1,6 +1,7 @@
 module ModifiedVLFInversionAlgorithms
 
 using Random, Statistics, LinearAlgebra, Dates
+using StatsBase: sample, Weights, mode
 using StaticArrays, AxisKeys, Distributions
 using GeographicLib, LibGEOS, Proj
 using NLopt, ImageFiltering
