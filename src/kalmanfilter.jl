@@ -815,10 +815,8 @@ function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4)
 
         ℓ = rx_phi_loglikelihood(yb_raw, y_phase_p, σ²; period=period)
 
-        # Accumulate (constant k_p ⇒ no forgetting factor)
-        for k in 0:period-1
-            log_post(path=p, k=k) .+= ℓ[k+1]
-        end
+        # Accumulate (constant k_p ⇒ no forgetting factor).
+        log_post(path=p) .+= ℓ
     end
 
     return log_post
