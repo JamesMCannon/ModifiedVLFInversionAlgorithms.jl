@@ -118,6 +118,116 @@ function balanced_circular_diff(vals, center; period=4, tol=1e-9)
     return perturbs
 end
 
+
+"""
+    circular_distance(a, b; period=4)
+Unsigned shortest arc in [0, period/2].
+"""
+function circular_distance(a, b; period=4)
+    d = mod(a - b, period)
+    return min(d, period - d)
+end
+
+"""
+    resultant_length(x; period=4)
+R ∈ [0,1]; near 0 indicates near-uniform data.
+"""
+function resultant_length(x; period=4)
+    θ = 2π .* x ./ period
+    return sqrt(mean(sin.(θ))^2 + mean(cos.(θ))^2)
+end
+
+"""
+    concentration_at(c, x; period=4)
+Σ cos(2π(xᵢ-c)/P); higher ⇒ data more clustered around c.
+"""
+function concentration_at(c, x; period=4)
+    return sum(cos.(2π .* (x .- c) ./ period))
+end
+
+"""
+    zero_sum_centers(x; period=4, tol=1e-9)
+
+Return all interior zero-sum centers: values c such that Σᵢ d(c, xᵢ) = 0,
+where d is the signed circular difference in (-P/2, P/2].
+
+S(c) = Σᵢ d(c, xᵢ) is a sawtooth function with slope -n on linear segments
+and upward jumps at antipodes. This function evaluates S at each segment's
+midpoint, solves for the zero linearly, and keeps crossings strictly interior
+to the segment (boundary zeros at antipodes are excluded).
+"""
+function zero_sum_centers(x; period=4, tol=1e-9)
+    n = length(x)
+    P = period
+    signed_diff(c, xi) = mod(xi - c + P/2, P) - P/2
+    S(c) = sum(signed_diff(c, xi) for xi in x)
+
+    antipodes_all = sort(mod.(x .+ P/2, P))
+    antipodes = Float64[]
+    for a in antipodes_all
+        if isempty(antipodes) || !isapprox(a, antipodes[end]; atol=tol)
+            push!(antipodes, a)
+        end
+    end
+    m = length(antipodes)
+
+    solutions = Float64[]
+    for k in 1:m
+        a_start = antipodes[k]
+        a_end = antipodes[mod1(k+1, m)]
+        ℓ = mod(a_end - a_start, P)
+        ℓ == 0 && (ℓ = P)
+
+        c_mid = mod(a_start + ℓ/2, P)
+        s_mid = S(c_mid)
+        offset_from_start = ℓ/2 + s_mid / n
+
+        # Strictly interior
+        if offset_from_start > tol && offset_from_start < ℓ - tol
+            push!(solutions, mod(a_start + offset_from_start, P))
+        end
+    end
+
+    sort!(solutions)
+    unique_sols = Float64[]
+    for s in solutions
+        if isempty(unique_sols) || !isapprox(s, unique_sols[end]; atol=tol)
+            push!(unique_sols, s)
+        end
+    end
+    return unique_sols
+end
+
+"""
+    robust_zero_sum_center(x; period=4, anchor=nothing, tol=1e-9)
+
+Return a single "best" zero-sum center for the dataset `x`.
+
+Selection rule:
+  1. If no interior zero-sum center exists: return `anchor` if provided,
+     else return `circular_mean(x)`.
+  2. If one exists: return it.
+  3. If multiple exist: return the one closest (in circular distance) to
+     `anchor` if provided, else the one maximizing concentration.
+"""
+function robust_zero_sum_center(x; period=4, anchor=nothing, tol=1e-9)
+    candidates = zero_sum_centers(x; period=period, tol=tol)
+
+    if isempty(candidates)
+        return anchor !== nothing ? mod(float(anchor), period) : circular_mean(x; period=period)
+    end
+
+    length(candidates) == 1 && return candidates[1]
+
+    if anchor !== nothing
+        _, idx = findmin(c -> circular_distance(c, anchor; period=period), candidates)
+    else
+        _, idx = findmax(c -> concentration_at(c, x; period=period), candidates)
+    end
+    return candidates[idx]
+end
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Categorical RX-offset inference helpers
 #
