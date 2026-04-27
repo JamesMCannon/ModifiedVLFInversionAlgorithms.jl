@@ -600,6 +600,81 @@ function obs2grid_distances(lonlats, paths; pathstep=100e3)
 end
 
 """
+    krigingmask(paths, projection, x_grid, y_grid;
+                pathstep=50e3, range=600e3, smooth_radius=0)
+
+Compute a kriging variance map over the grid `(x_grid, y_grid)` (assumed to be in
+`projection`), conditioned on waypoints sampled every `pathstep` meters along each
+`(transmitter, receiver)` tuple in `paths`. The variogram is a unit-sill Gaussian with
+length scale `range`.
+
+Cells far from every path approach the variogram sill (≈1.0); cells near a path approach 0.
+This is the same quantity computed by the plotting-side `krigingmask` in
+`gridInterpolate.jl`, just adapted to be called before an `itp` exists and on a grid that
+is already in the model projection.
+
+The returned `Matrix{Float64}` has shape `(length(y_grid), length(x_grid))`. Its linear
+(column-major) indexing matches the order produced by `densify(x_grid, y_grid)`, which is
+also the row ordering of the `localization` matrix built from the same grid — so the
+result can be passed directly to [`filterbounds!`](@ref).
+
+If `smooth_radius > 0`, a `(2*smooth_radius+1)`-square median filter is applied to the
+variance map. The default of 0 (no smoothing) is appropriate for the coarse grid used in
+`init_params`; increase it for finer grids.
+
+See also: [`filterbounds!`](@ref), [`densify`](@ref)
+"""
+function krigingmask(paths, projection, x_grid, y_grid;
+                     pathstep=100e3, range=600e3, smooth_radius=0)
+    # Conditioning points: waypoints along every path, in WGS84.
+    allwpts = Vector{Tuple{Float64,Float64}}()
+    for i in eachindex(paths)
+        tx, rx = paths[i][1], paths[i][2]
+        _, wpts = pathpts(tx, rx; dist=pathstep)
+        append!(allwpts, [(w.lon, w.lat) for w in wpts])
+        push!(allwpts, (rx.longitude, rx.latitude))
+        # Extra fine-spaced point just past the transmitter — suppresses a small
+        # low-variance "dead zone" exactly at the transmitter location.
+        _, near_wpts = pathpts(tx, rx; dist=pathstep/10)
+        push!(allwpts, (near_wpts[2].lon, near_wpts[2].lat))
+    end
+
+    # Project conditioning points into the model projection, dedup (GeoStats requires it).
+    trans = Proj.Transformation(wgs84(), projection)
+    uidx = unique(i -> allwpts[i], 1:length(allwpts))
+    wptpts = PointSet(trans.(allwpts[uidx]))
+
+    # Conditioning data is identically zero — we only care about variance, not the mean.
+    geox = georef((f=zeros(length(wptpts)),), wptpts)
+    solver = Kriging(:f => (
+    variogram    = GaussianVariogram(range=range, sill=1.0, nugget=0.001),
+    mean         = 0.0,
+    neighborhood = MetricBall(3*range),
+    ))
+
+    # Grid is already in `projection`, so no transform of the evaluation points.
+    grid_pts = PointSet([(x, y) for x in x_grid for y in y_grid])
+    problem  = EstimationProblem(geox, grid_pts, :f)
+    solution = solve(problem, solver)
+
+    varmap = Matrix{Float64}(undef, length(y_grid), length(x_grid))
+    for i in eachindex(varmap, solution.f_variance)
+        varmap[i] = solution.f_variance[i]
+    end
+
+    # NaN at conditioning points → treat as the sill (effectively "fully unknown")
+    varmap = replace(x -> isnan(x) ? 1.0 : x, varmap)
+
+    if smooth_radius > 0
+        kernel = (2*smooth_radius+1, 2*smooth_radius+1)
+        varmap = mapwindow(median, varmap, kernel)
+    end
+
+    return varmap
+end
+
+
+"""
     filterbounds!(localization, lonlat, west, east, south, north)
 
 Set `localization` entries to `0` if the corresponding `lonlat` entry is outside of the
@@ -609,6 +684,35 @@ function filterbounds!(localization, lonlat, west, east, south, north)
     for i in eachindex(lonlat)
         if lonlat[i][1] < west || lonlat[i][1] > east || lonlat[i][2] < south || lonlat[i][2] > north
             localization[i,:] .= 0
+        end
+    end
+    return localization
+end
+
+"""
+    filterbounds!(localization, varmap, threshold)
+
+Multiple-dispatch alternative to
+[`filterbounds!(localization, lonlat, west, east, south, north)`](@ref) that filters
+based on a kriging variance map (e.g. from [`krigingmask`](@ref)) instead of a
+rectangular lon/lat box.
+
+For each grid cell, if `varmap[i] > threshold`, row `i` of `localization` is zeroed out.
+This produces a filter that conforms to the actual path geometry rather than to a coarse
+cardinal-aligned box.
+
+The linear indexing of `varmap` must match the row ordering of `localization`, i.e. both
+must be derived from the same `densify(x_grid, y_grid)`. `krigingmask(paths, projection,
+x_grid, y_grid; …)` is constructed to satisfy this.
+
+A typical threshold for a unit-sill Gaussian variogram is `0.2^2 = 0.04`, matching the
+plotting-side mask in `gridInterpolate.jl`.
+"""
+function filterbounds!(localization, varmap::AbstractArray, threshold::Real)
+    @assert length(varmap) == size(localization, 1) "length(varmap) ($(length(varmap))) must equal size(localization, 1) ($(size(localization, 1)))"
+    for i in eachindex(varmap)
+        if isnan(varmap[i]) || varmap[i] > threshold
+            localization[i, :] .= 0
         end
     end
     return localization
