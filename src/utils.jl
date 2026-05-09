@@ -326,6 +326,36 @@ function rx_phi_posterior(log_post_path)
     return w ./ sum(w)
 end
 
+"""
+    sample_rx_offsets!(offset_matrix, rx_log_post, rng;
+                       commit_threshold=1.0, period=4) → offset_matrix
+
+Fill `offset_matrix::AbstractMatrix{<:Real}` of size `(npaths, ens_size)` with
+per-(path, ens) integer offsets drawn from the per-path categorical posterior
+encoded by `rx_log_post::KeyedArray(path, k)`. Paths whose normalized posterior
+maximum exceeds `commit_threshold` deterministically receive the MAP k for every
+ensemble member; all other paths sample independently per member.
+
+Mirrors the per-path sampling logic embedded in the categorical-path
+`ensemble_model!` so both the forward-model offset assignment and the
+post-update `posterior_resample_correct!` call share one implementation.
+"""
+function sample_rx_offsets!(offset_matrix::AbstractMatrix, rx_log_post, rng;
+                            commit_threshold=1.0, period=4)
+    npaths, ens_size = size(offset_matrix)
+    @assert length(rx_log_post.path) == npaths "sample_rx_offsets!: path count mismatch ($(length(rx_log_post.path)) vs $npaths)"
+    for (n, p) in enumerate(rx_log_post.path)
+        log_post_p   = collect(rx_log_post(path=p))
+        post_p       = rx_phi_posterior(log_post_p)
+        max_p, k_map = findmax(post_p)
+        if max_p ≥ commit_threshold
+            offset_matrix[n, :] .= k_map - 1     # findmax is 1-based; offsets are 0-based
+        else
+            offset_matrix[n, :] .= rx_phi_sample(log_post_p, ens_size, rng; period=period)
+        end
+    end
+    return offset_matrix
+end
 
 """
     strip(m::KeyedArray)

@@ -824,6 +824,56 @@ function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4)
     return log_post
 end
 
+"""
+    posterior_resample_correct!(yb, rx_phi_offset, rx_log_post, rng;
+                                commit_threshold=1.0, period=4) → rx_phi_offset
+
+After `categorical_rx_update!` has folded the current iteration's observation
+into `rx_log_post`, draw fresh per-(path, ens) offsets from the *updated*
+posterior and apply the implied per-member quarter-turn shift to `yb` in place.
+`rx_phi_offset` is overwritten with the freshly drawn values so downstream
+recordkeeping reflects exactly what the subsequent `xy_only_update` saw.
+
+Closes the information gap in the categorical branch: before this call, `yb`
+was built inside `H_cat!` from samples drawn against `rx_log_post(t=i-1)`, so
+the xy_state LETKF would otherwise update against pre-evidence offsets. After
+this call, `yb` honors the post-evidence posterior — particularly important on
+iterations where the new observation tipped one or more paths above
+`commit_threshold`, collapsing their per-member spread to MAP and removing the
+corresponding contribution to `Y_phase`.
+
+# Arguments
+- `yb`: ensemble prediction `(field, path, ens)` — `:phase` channel mutated.
+- `rx_phi_offset`: per-(path, ens) offsets currently baked into `yb`; mutated
+  in place to hold the freshly drawn values.
+- `rx_log_post`: refined per-path log-posterior at this iteration.
+- `rng`: RNG used for per-member sampling on uncertain paths.
+- `commit_threshold`: posterior max above which the path commits to MAP.
+- `period`: number of categorical levels (4 for MSK).
+"""
+function posterior_resample_correct!(yb, rx_phi_offset, rx_log_post, rng;
+                                     commit_threshold=1.0, period=4)
+    @assert axiskeys(yb, :path) == axiskeys(rx_phi_offset, :path) == axiskeys(rx_log_post, :path) "posterior_resample_correct!: :path axis mismatch"
+    @assert axiskeys(yb, :ens)  == axiskeys(rx_phi_offset, :ens)  "posterior_resample_correct!: :ens axis mismatch"
+
+    npaths   = length(rx_phi_offset.path)
+    ens_size = length(rx_phi_offset.ens)
+    quarter  = π / (period / 2)   # = π/2 for period=4
+
+    new_sampled = Matrix{Float64}(undef, npaths, ens_size)
+    sample_rx_offsets!(new_sampled, rx_log_post, rng;
+                       commit_threshold=commit_threshold, period=period)
+
+    for e in 1:ens_size
+        old = parent(parent(rx_phi_offset(ens=e)))   # length-npaths plain Vector
+        new = view(new_sampled, :, e)
+        Δk  = circular_diff.(new, old; period=period)
+        yb(field=:phase, ens=e) .+= Δk .* quarter
+        rx_phi_offset(ens=e) .= new
+    end
+
+    return rx_phi_offset
+end
 
 """
     ensemble_model!(ym, f, x::NamedTuple, rx_log_post, rng)
@@ -856,18 +906,7 @@ function ensemble_model!(ym, f, x::NamedTuple, rx_log_post, rng; commit_threshol
     # exceeds `commit_threshold`. Pre-build the (path × ens) offset matrix so the
     # threaded forward-model loop never touches `rng`.
     sampled = Matrix{Float64}(undef, npaths, ens_size)
-    for (n, p) in enumerate(x.rx_phi_offset.path)
-        log_post_p = collect(rx_log_post(path=p))
-        post_p = rx_phi_posterior(log_post_p)
-        max_p, k_map = findmax(post_p)
-        if max_p ≥ commit_threshold
-            # Confident path: every member gets the same MAP k. Collapses phase
-            # spread for the downstream xy_state LETKF update.
-            sampled[n, :] .= k_map - 1   # findmax returns 1-based index
-        else
-            sampled[n, :] .= rx_phi_sample(log_post_p, ens_size, rng)
-        end
-    end
+    sample_rx_offsets!(sampled, rx_log_post, rng; commit_threshold=commit_threshold)
     for e in 1:ens_size
         x.rx_phi_offset(ens=e) .= view(sampled, :, e)
     end
