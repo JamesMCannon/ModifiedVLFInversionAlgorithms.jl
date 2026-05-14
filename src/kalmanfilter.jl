@@ -749,7 +749,7 @@ end
 # Categorical RX-offset update path
 #
 # Alternative to `rx_phi_update` for the discrete MSK-ambiguity case where
-# k_p ∈ {0,1,2,3} is constant in time. Maintains a per-path log-posterior and
+# Bϕ ∈ {0,1,2,3} is constant in time. Maintains a per-path log-posterior and
 # accumulates evidence across iterations. See `runletkf` `:categorical` branch.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -758,7 +758,7 @@ end
         → log_post (mutated)
 
 Accumulate Bayesian evidence into the per-path log-posterior `log_post`
-(`KeyedArray` with dims `path × k`, where `k = 0:period-1`) given the current
+(`KeyedArray` with dims `path × Bϕ`, where `Bϕ = 0:period-1`) given the current
 ensemble forward-model output `yb`, the per-member offsets that were applied
 inside the forward model `current_offsets` (`KeyedArray(path, ens)`), the
 observation `y` for this iteration, and the diagonal observation-noise vector
@@ -767,17 +767,17 @@ observation `y` for this iteration, and the diagonal observation-noise vector
 # Recovery of offset-free `yb`
 `ensemble_model!` adds `current_offsets(path=p, ens=e) * (π/2)` to
 `yb(:phase, path=p, ens=e)` before this function sees it. To compute the
-likelihood of each candidate `k`, we need the raw forward-model output. We
+likelihood of each candidate `Bϕ`, we need the raw forward-model output. We
 recover it on the fly by subtracting `current_offsets * (π/2)` per member.
 This avoids a duplicate forward-model call.
 
 # Posterior accumulation
-`k_p` is constant in time (MSK ambiguity is fixed at receiver lock per
+`Bϕ` is constant in time (MSK ambiguity is fixed at receiver lock per
 preprocessing assumption), so iteration `t`'s posterior is
 
-    log_post_t(k) = log_post_{t-1}(k) + ℓ_t(k)
+    log_post_t(Bϕ) = log_post_{t-1}(Bϕ) + ℓ_t(Bϕ)
 
-where `ℓ_t(k)` is the marginal log-likelihood from `rx_phi_loglikelihood`.
+where `ℓ_t(Bϕ)` is the marginal log-likelihood from `rx_phi_loglikelihood`.
 Normalization is applied lazily — `log_post` accumulates as raw log-likelihoods,
 and consumers (`rx_phi_posterior`, `rx_phi_sample`) normalize on read.
 
@@ -817,7 +817,7 @@ function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4)
 
         ℓ = rx_phi_loglikelihood(yb_raw, y_phase_p, σ²; period=period)
 
-        # Accumulate (constant k_p ⇒ no forgetting factor).
+        # Accumulate (constant Bϕ).
         log_post(path=p) .+= ℓ
     end
 
@@ -867,8 +867,8 @@ function posterior_resample_correct!(yb, rx_phi_offset, rx_log_post, rng;
     for e in 1:ens_size
         old = parent(parent(rx_phi_offset(ens=e)))   # length-npaths plain Vector
         new = view(new_sampled, :, e)
-        Δk  = circular_diff.(new, old; period=period)
-        yb(field=:phase, ens=e) .+= Δk .* quarter
+        ΔBϕ = circular_diff.(new, old; period=period)
+        yb(field=:phase, ens=e) .+= ΔBϕ .* quarter
         rx_phi_offset(ens=e) .= new
     end
 
@@ -883,9 +883,9 @@ Categorical-path variant of `ensemble_model!`. Identical to the standard
 is **sampled from the current per-path posterior** `rx_log_post` rather than
 read from `x.rx_phi_offset` directly.
 
-This implements the marginalization-over-k step: each ensemble member of
-`xy_state` is paired with an independently-drawn `k_p` per path, so the
-ensemble of modeled phases honestly represents joint uncertainty in `(x, k)`.
+This implements the marginalization-over-Bϕ step: each ensemble member of
+`xy_state` is paired with an independently-drawn `Bϕ` per path, so the
+ensemble of modeled phases honestly represents joint uncertainty in `(x, Bϕ)`.
 The drawn offsets are written into `x.rx_phi_offset(ens=e)` so that downstream
 consumers (saving, heatmaps, the next iteration's `categorical_rx_update!`)
 see a consistent record of what was actually used.

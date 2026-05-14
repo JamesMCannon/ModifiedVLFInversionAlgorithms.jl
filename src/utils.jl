@@ -232,7 +232,7 @@ end
 # Categorical RX-offset inference helpers
 #
 # These support the alternate `rx_method=:categorical` path in runletkf, which
-# treats `rx_phi_offset` as a per-path categorical k_p ∈ {0,1,2,3} representing
+# treats `rx_phi_offset` as a per-path categorical Bϕ ∈ {0,1,2,3} representing
 # the MSK 90° demodulation ambiguity rather than as a continuous LETKF state.
 # Pure functions only — no dependency on filter loop state.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,15 +264,15 @@ end
 For a single path, given the ensemble of modeled phases `yb_phase_path`
 (length `ens_size`, *without* any rx offset baked in — see note), the scalar
 observed phase `y_phase_path`, and observation variance `σ²`, return the
-log-likelihood of each candidate offset `k ∈ 0:period-1` after marginalizing
+log-likelihood of each candidate offset `Bϕ ∈ 0:period-1` after marginalizing
 over the ensemble.
 
 The marginalization is
 
-    ℓ(k) = log( (1/N) · Σ_e exp[ -½ · phasediff(y, yb_e + k·π/2)² / σ² ] )
+    ℓ(Bϕ) = log( (1/N) · Σ_e exp[ -½ · phasediff(y, yb_e + Bϕ·π/2)² / σ² ] )
 
 i.e. logsumexp over members of the per-member Gaussian log-likelihood, minus
-log(N). The minus-log(N) is a `k`-independent constant that drops out of the
+log(N). The minus-log(N) is a `Bϕ`-independent constant that drops out of the
 posterior after normalization, so it can safely be omitted; we keep it so the
 returned numbers are interpretable as honest log-likelihoods.
 
@@ -288,9 +288,9 @@ function rx_phi_loglikelihood(yb_phase_path, y_phase_path, σ²; period=4)
     N = length(yb_phase_path)
     invN_log = -log(N)
     quarter = π / (period / 2)  # = π/2 for period=4
-    for k in 0:period-1
-        offset_rad = k * quarter
-        ℓ[k+1] = invN_log + logsumexp(
+    for Bϕ in 0:period-1
+        offset_rad = Bϕ * quarter
+        ℓ[Bϕ+1] = invN_log + logsumexp(
             -0.5 * phasediff(y_phase_path, yb_e + offset_rad)^2 / σ²
             for yb_e in yb_phase_path
         )
@@ -332,8 +332,8 @@ end
 
 Fill `offset_matrix::AbstractMatrix{<:Real}` of size `(npaths, ens_size)` with
 per-(path, ens) integer offsets drawn from the per-path categorical posterior
-encoded by `rx_log_post::KeyedArray(path, k)`. Paths whose normalized posterior
-maximum exceeds `commit_threshold` deterministically receive the MAP k for every
+encoded by `rx_log_post::KeyedArray(path, Bϕ)`. Paths whose normalized posterior
+maximum exceeds `commit_threshold` deterministically receive the MAP Bϕ for every
 ensemble member; all other paths sample independently per member.
 
 Mirrors the per-path sampling logic embedded in the categorical-path
@@ -347,9 +347,9 @@ function sample_rx_offsets!(offset_matrix::AbstractMatrix, rx_log_post, rng;
     for (n, p) in enumerate(rx_log_post.path)
         log_post_p   = collect(rx_log_post(path=p))
         post_p       = rx_phi_posterior(log_post_p)
-        max_p, k_map = findmax(post_p)
+        max_p, Bϕ_map = findmax(post_p)
         if max_p ≥ commit_threshold
-            offset_matrix[n, :] .= k_map - 1     # findmax is 1-based; offsets are 0-based
+            offset_matrix[n, :] .= Bϕ_map - 1     # findmax is 1-based; offsets are 0-based
         else
             offset_matrix[n, :] .= rx_phi_sample(log_post_p, ens_size, rng; period=period)
         end
