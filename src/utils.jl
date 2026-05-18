@@ -293,7 +293,7 @@ function rx_phi_loglikelihood(yb_phase_path, y_phase_path, σ²; period=4)
     for Bϕ in 0:period-1
         offset_rad = Bϕ * quarter
         ℓ[Bϕ+1] = invN_log + logsumexp(
-            -0.5 * phasediff(y_phase_path, yb_e + offset_rad)^2 / σ
+            -0.5 * phasediff(y_phase_path, yb_e + offset_rad)^2 / σ²
             for yb_e in yb_phase_path
         )
     end
