@@ -786,7 +786,7 @@ Same convention as `rx_phi_update`: `R` may be length `npaths` (phase only) or
 `2*npaths` (amp first, then phase). Phase variances are the second half in the
 combined case. Each path uses its own σ².
 """
-function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4)
+function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4, η=1.0)
     npaths = length(yb.path)
     quarter = π / (period / 2)  # = π/2 for period=4
 
@@ -818,7 +818,7 @@ function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4)
         ℓ = rx_phi_loglikelihood(yb_raw, y_phase_p, σ²; period=period)
 
         # Accumulate (constant Bϕ).
-        log_post(path=p) .+= ℓ
+        log_post(path=p) .+= ℓ .* η  # optional learning rate η to temper updates and prevent overconfidence in early iterations
     end
 
     return log_post
