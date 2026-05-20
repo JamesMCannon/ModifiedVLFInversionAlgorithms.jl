@@ -55,24 +55,54 @@ function LETKF_measupdate(H, xb, y, R;
 end
 
 function LETKF_measupdate(H, xb::NamedTuple, y, R;
-        ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), filtertype=:stacked, log10pwr_update=false)
+        ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase),
+        filtertype=:stacked, log10pwr_update=false,
+        rng=nothing, η=1.0, commit_threshold=1.0)
 
-    if filtertype==:stacked 
-        return LETKF_stacked_update(H, xb, y, R; ρ=ρ, localization=localization, datatypes=datatypes, log10pwr_update=log10pwr_update)
-    elseif filtertype==:dual && (haskey(xb, :tx_pwrs) || haskey(xb, :rx_phi_offset))
-        return LETKF_dual_update(H, xb, y, R; ρ=ρ, localization=localization, datatypes=datatypes, log10pwr_update=log10pwr_update)
-    elseif filtertype==:split && (haskey(xb, :tx_pwrs) || haskey(xb, :rx_phi_offset))
-        return LETKF_split_update(H, xb, y, R; ρ=ρ, localization=localization, datatypes=datatypes, log10pwr_update=log10pwr_update)
+    # Categorical RX needs phase data, an RNG for posterior sampling, and a
+    # per-iteration rx_phi_offset buffer alongside the persistent log-posterior.
+    if haskey(xb, :rx_phi_logpost)
+        :phase in datatypes ||
+            error("LETKF_measupdate: xb carries :rx_phi_logpost but :phase ∉ datatypes; \
+                   categorical RX estimation requires phase observations.")
+        isnothing(rng) &&
+            error("LETKF_measupdate: xb carries :rx_phi_logpost; a non-nothing `rng` \
+                   keyword is required for categorical RX sampling.")
+        haskey(xb, :rx_phi_offset) ||
+            error("LETKF_measupdate: xb carries :rx_phi_logpost but not :rx_phi_offset; \
+                   both are required for the categorical RX update.")
+    end
+
+    if filtertype == :stacked
+        return LETKF_stacked_update(H, xb, y, R; ρ=ρ, localization=localization,
+            datatypes=datatypes, log10pwr_update=log10pwr_update,
+            rng=rng, η=η, commit_threshold=commit_threshold)
+    elseif filtertype == :dual && (haskey(xb, :tx_pwrs) || haskey(xb, :rx_phi_logpost))
+        return LETKF_dual_update(H, xb, y, R; ρ=ρ, localization=localization,
+            datatypes=datatypes, log10pwr_update=log10pwr_update,
+            rng=rng, η=η, commit_threshold=commit_threshold)
+    elseif filtertype == :split && (haskey(xb, :tx_pwrs) || haskey(xb, :rx_phi_logpost))
+        return LETKF_split_update(H, xb, y, R; ρ=ρ, localization=localization,
+            datatypes=datatypes, log10pwr_update=log10pwr_update,
+            rng=rng, η=η, commit_threshold=commit_threshold)
     else
         error("Unknown filter type: $filtertype. Currently :stacked, :dual, and :split are implemented.")
     end
-
 end
 
 function LETKF_stacked_update(H, xb::NamedTuple, y, R;
-    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), log10pwr_update=false)
-    
-    # 1. Compute ensemble measurements
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase),
+    log10pwr_update=false, rng=nothing, η=1.0, commit_threshold=1.0)
+
+    do_rx = haskey(xb, :rx_phi_logpost)
+
+    # Draw per-member prior offsets so the forward model marginalizes over Bϕ.
+    if do_rx
+        _draw_prior_rx_offsets!(xb.rx_phi_offset, xb.rx_phi_logpost, rng;
+                                commit_threshold=commit_threshold)
+    end
+
+    # 1. Ensemble measurements (prior offsets, if any, are baked into yb by ensemble_model!)
     yb = H(xb)
     ybar = mean(yb, dims=:ens)
 
@@ -91,7 +121,7 @@ function LETKF_stacked_update(H, xb::NamedTuple, y, R;
 
     # 3. Update each field if it exists
     updated_fields = NamedTuple()
-    
+
     if haskey(xb, :xy_state)
         xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
                                    ρ=ρ, localization=localization, datatypes=datatypes)
@@ -100,7 +130,7 @@ function LETKF_stacked_update(H, xb::NamedTuple, y, R;
 
     if haskey(xb, :tx_pwrs)
         if log10pwr_update
-            log10_tx_pwrs = log10.(xb.tx_pwrs)
+            log10_tx_pwrs   = log10.(xb.tx_pwrs)
             log10_tx_pwrs_a = tx_pwrs_update(log10_tx_pwrs, y, ybar, Y, R; ρ=ρ)
             tx_pwrs = 10 .^ log10_tx_pwrs_a
         else
@@ -109,18 +139,30 @@ function LETKF_stacked_update(H, xb::NamedTuple, y, R;
         updated_fields = merge(updated_fields, (; tx_pwrs))
     end
 
-    if haskey(xb, :rx_phi_offset)
-        rx_phi_offset = rx_phi_update(xb.rx_phi_offset, y, ybar, Y, R; ρ=ρ)
-        updated_fields = merge(updated_fields, (; rx_phi_offset))
+    # Categorical RX update. correct_yb=false: yb is left untouched, so the
+    # xy_state / tx updates above never see the phase-bias correction.
+    if do_rx
+        rx_phi_offset, rx_phi_logpost = categorical_rx_measupdate!(
+            xb.rx_phi_logpost, yb, xb.rx_phi_offset, y, R, rng;
+            η=η, commit_threshold=commit_threshold, correct_yb=false)
+        updated_fields = merge(updated_fields, (; rx_phi_offset, rx_phi_logpost))
     end
 
     return updated_fields
 end
 
 function LETKF_dual_update(H, xb::NamedTuple, y, R;
-    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), log10pwr_update=false)
-    
-    # 1. Compute ensemble measurements
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase),
+    log10pwr_update=false, rng=nothing, η=1.0, commit_threshold=1.0)
+
+    do_rx = haskey(xb, :rx_phi_logpost)
+
+    if do_rx
+        _draw_prior_rx_offsets!(xb.rx_phi_offset, xb.rx_phi_logpost, rng;
+                                commit_threshold=commit_threshold)
+    end
+
+    # 1. Ensemble measurements
     yb = H(xb)
     ybar = mean(yb, dims=:ens)
 
@@ -141,14 +183,13 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
     updated_fields = NamedTuple()
     
     if haskey(xb, :tx_pwrs)
-
         if log10pwr_update
             log10_tx_pwrs = log10.(xb.tx_pwrs)
             log10_tx_pwrs_a = tx_pwrs_update(log10_tx_pwrs, y, ybar, Y, R; ρ=ρ)
             tx_pwrs = 10 .^ log10_tx_pwrs_a
         else
             tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
-        end        
+        end
         updated_fields = merge(updated_fields, (; tx_pwrs))
 
         pathnames=y.path
@@ -156,21 +197,19 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
         for e in tx_pwrs.ens
             for tx in tx_pwrs.pwrs
                 txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
-
                 Δpwr_log = log10(tx_pwrs(pwrs=tx, ens=e) / xb.tx_pwrs(pwrs=tx, ens=e))
                 yb(field=:amp, ens=e, path=txpaths) .+= Δpwr_log * 10  #10 dB per decade
             end
         end
     end
 
-    if haskey(xb, :rx_phi_offset)
-        rx_phi_offset = rx_phi_update(xb.rx_phi_offset, y, ybar, Y, R; ρ=ρ)
-        updated_fields = merge(updated_fields, (; rx_phi_offset))
-
-        # Apply final estimated RX offsets to ym prior to measurement update for then calculating the XY update
-        for e in rx_phi_offset.ens
-            yb(field=:phase, ens=e) .+= circular_diff.(rx_phi_offset(ens=e), xb.rx_phi_offset(ens=e)) .* (π/2)
-        end
+    # Categorical RX update. correct_yb=true: posterior_resample_correct! shifts
+    # yb(:phase) so the xy_state update consumes post-evidence offsets.
+    if do_rx
+        rx_phi_offset, rx_phi_logpost = categorical_rx_measupdate!(
+            xb.rx_phi_logpost, yb, xb.rx_phi_offset, y, R, rng;
+            η=η, commit_threshold=commit_threshold, correct_yb=true)
+        updated_fields = merge(updated_fields, (; rx_phi_offset, rx_phi_logpost))
     end
 
     # Recompute Y after applying bias updates to yb
@@ -198,39 +237,55 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
     return updated_fields
 end
 
-
 function LETKF_split_update(H, xb::NamedTuple, y, R;
-    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase), log10pwr_update=false)
-    
-    if !((haskey(xb, :tx_pwrs) && (:split_ens in dimnames(xb.tx_pwrs))) || (haskey(xb, :rx_phi_offset) && (:split_ens in dimnames(xb.rx_phi_offset))))
-            error("Must have split ensemble dimension in tx_pwrs or rx_phi_offset to use split update.")
+    ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase),
+    log10pwr_update=false, rng=nothing, η=1.0, commit_threshold=1.0)
+
+    # Categorical RX carries no :split_ens dimension, so a split run with no TX
+    # state is just a dual run — delegate rather than error.
+    if !haskey(xb, :tx_pwrs)
+        return LETKF_dual_update(H, xb, y, R; ρ=ρ, localization=localization,
+            datatypes=datatypes, log10pwr_update=log10pwr_update,
+            rng=rng, η=η, commit_threshold=commit_threshold)
     end
- 
-    # 1. Run forward model once
+
+    (:split_ens in dimnames(xb.tx_pwrs)) ||
+        error("LETKF_split_update: xb.tx_pwrs must contain a :split_ens dimension.")
+
+    do_rx = haskey(xb, :rx_phi_logpost)
+
+    if do_rx
+        _draw_prior_rx_offsets!(xb.rx_phi_offset, xb.rx_phi_logpost, rng;
+                                commit_threshold=commit_threshold)
+    end
+
+    # 1. Forward model once.
     yb = H(xb)
- 
-    # 2. Bias-only update (TX amplitude, then RX phase); yb corrected in-place
-    tx_prior = haskey(xb, :tx_pwrs)       ? xb.tx_pwrs       : nothing
-    rx_prior = haskey(xb, :rx_phi_offset) ? xb.rx_phi_offset : nothing
- 
-    new_tx_pwrs, new_rx_phi_offset = bias_only_update!(yb, tx_prior, rx_prior, y, R;
-        ρ=ρ, log10pwr_update=log10pwr_update)
- 
+
     updated_fields = NamedTuple()
-    if !isnothing(new_tx_pwrs)
-        updated_fields = merge(updated_fields, (; tx_pwrs=new_tx_pwrs))
+
+    # 2a. TX bias: split-ensemble update; bias_only_update! folds the amplitude
+    #     correction into yb in place.
+    new_tx_pwrs = bias_only_update!(yb, xb.tx_pwrs, y, R;
+                                    ρ=ρ, log10pwr_update=log10pwr_update)
+    updated_fields = merge(updated_fields, (; tx_pwrs=new_tx_pwrs))
+
+    # 2b. RX bias: categorical update on the dual path; correct_yb=true folds the
+    #     phase correction into yb in place.
+    if do_rx
+        rx_phi_offset, rx_phi_logpost = categorical_rx_measupdate!(
+            xb.rx_phi_logpost, yb, xb.rx_phi_offset, y, R, rng;
+            η=η, commit_threshold=commit_threshold, correct_yb=true)
+        updated_fields = merge(updated_fields, (; rx_phi_offset, rx_phi_logpost))
     end
-    if !isnothing(new_rx_phi_offset)
-        updated_fields = merge(updated_fields, (; rx_phi_offset=new_rx_phi_offset))
-    end
- 
-    # 3. xy_state update on the bias-corrected yb (ybar/Y recomputed inside)
+
+    # 3. xy_state update on the fully bias-corrected yb (no extra forward call).
     if haskey(xb, :xy_state)
         xy_state = xy_only_update(yb, xb.xy_state, y, R;
             ρ=ρ, localization=localization, datatypes=datatypes)
         updated_fields = merge(updated_fields, (; xy_state))
     end
- 
+
     return updated_fields
 end
  
@@ -240,89 +295,59 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
  
 """
-    bias_only_update!(yb, tx_pwrs, rx_phi_offset, y, R; ρ, log10pwr_update)
- 
-Perform only the TX-power and RX-phase-offset LETKF updates from `LETKF_split_update`,
-then immediately apply the resulting corrections back into `yb` so that accumulated
-bias estimates are reflected in the ensemble predictions before the next window step.
- 
+    bias_only_update!(yb, tx_pwrs, y, R; ρ, log10pwr_update) → new_tx_pwrs
+
+Perform only the split-ensemble TX-power LETKF update, then immediately fold the
+resulting amplitude correction back into `yb` so accumulated bias estimates are
+reflected in the ensemble predictions before the next window step.
+
+RX phase-offset estimation is no longer handled here — it is performed
+categorically (see [`categorical_rx_measupdate!`]) and carries no `:split_ens`
+dimension, so it is independent of the split TX machinery.
+
 # Arguments
 - `yb`: ensemble prediction array `(field, path, ens)` — **mutated in-place**.
-- `tx_pwrs`: current TX-power prior with dims `(pwrs, ens, split_ens)`, or `nothing`.
-- `rx_phi_offset`: current RX-phase-offset prior with dims `(path, ens, split_ens)`, or `nothing`.
+- `tx_pwrs`: current TX-power prior with dims `(pwrs, ens, split_ens)`.
 - `y`: observed data for this window step.
 - `R`: diagonal observation-noise variance vector.
- 
-Returns `(new_tx_pwrs, new_rx_phi_offset)` — refined bias estimates to be used as the
-prior for the next window iteration.  Either return value is `nothing` when the
-corresponding statetype is absent.
- 
+
+Returns `new_tx_pwrs`, the refined TX-power estimate to be used as the prior for
+the next window iteration.
+
 # Design notes
-- TX updates consume only amplitude data; RX updates consume only phase data.
-  The two updates are therefore independent and can be applied in either order.
-- The yb correction for TX is the log-power change (in dB) relative to the prior mean.
-- The yb correction for RX is the circular change in mode offset (in radians).
-- Calling this function N times with successive observations accumulates corrections
-  that telescope to `log10(mean(tx_N)/mean(tx_0))*10` — identical to a single step
+- The `yb` correction is the log-power change (in dB) relative to the prior mean.
+- Calling this N times with successive observations accumulates corrections that
+  telescope to `log10(mean(tx_N)/mean(tx_0))*10` — identical to a single step
   applied with the final estimate.
 """
-function bias_only_update!(yb, tx_pwrs, rx_phi_offset, y, R; ρ=1.1, log10pwr_update=false)
- 
+function bias_only_update!(yb, tx_pwrs, y, R; ρ=1.1, log10pwr_update=false)
+
     pathnames = y.path
     npaths = length(pathnames)
- 
-    if !isnothing(tx_pwrs) && :split_ens in dimnames(tx_pwrs)
-        split_ens_size = length(tx_pwrs.split_ens)
-    elseif !isnothing(rx_phi_offset) && :split_ens in dimnames(rx_phi_offset)
-        split_ens_size = length(rx_phi_offset.split_ens)
-    else
-        error("bias_only_update!: tx_pwrs or rx_phi_offset must contain a :split_ens dimension")
-    end
- 
-    new_tx_pwrs = nothing
-    new_rx_phi_offset = nothing
- 
+
+    (:split_ens in dimnames(tx_pwrs)) ||
+        error("bias_only_update!: tx_pwrs must contain a :split_ens dimension")
+    split_ens_size = length(tx_pwrs.split_ens)
+
     # ── TX power update (amplitude data only) ────────────────────────────────
-    if !isnothing(tx_pwrs)
-        new_tx_pwrs = similar(tx_pwrs)
-        @showprogress Threads.@threads for e in yb.ens
-            split_tx_update!(yb(ens=e), tx_pwrs(ens=e), new_tx_pwrs(ens=e),
-                             y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
-        end
- 
-        # Accumulate amplitude correction: Δ = change in mean log-power per TX
-        for e in new_tx_pwrs.ens
-            for tx in new_tx_pwrs.pwrs
-                txpaths  = pathnames[startswith.(pathnames, String(tx) * "-")]
-                Δpwr_log = log10(mean(new_tx_pwrs(pwrs=tx, ens=e)) /
-                                 mean(tx_pwrs(pwrs=tx, ens=e)))
-                yb(field=:amp, ens=e, path=txpaths) .+= Δpwr_log * 10  # 10 dB/decade
-            end
+    new_tx_pwrs = similar(tx_pwrs)
+    @showprogress Threads.@threads for e in yb.ens
+        split_tx_update!(yb(ens=e), tx_pwrs(ens=e), new_tx_pwrs(ens=e),
+                         y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
+    end
+
+    # Accumulate amplitude correction: Δ = change in mean log-power per TX
+    for e in new_tx_pwrs.ens
+        for tx in new_tx_pwrs.pwrs
+            txpaths  = pathnames[startswith.(pathnames, String(tx) * "-")]
+            Δpwr_log = log10(mean(new_tx_pwrs(pwrs=tx, ens=e)) /
+                             mean(tx_pwrs(pwrs=tx, ens=e)))
+            yb(field=:amp, ens=e, path=txpaths) .+= Δpwr_log * 10  # 10 dB/decade
         end
     end
- 
-    # ── RX phase-offset update (phase data only) ─────────────────────────────
-    if !isnothing(rx_phi_offset)
-        new_rx_phi_offset = similar(rx_phi_offset)
-        @showprogress Threads.@threads for e in yb.ens
-            split_rx_update!(yb(ens=e), rx_phi_offset(ens=e), new_rx_phi_offset(ens=e),
-                             y, R, ρ, npaths, split_ens_size, pathnames)
-        end
- 
-        # Accumulate phase correction: Δ = change in mode offset per path (quarter-turns → radians)
-        for e in new_rx_phi_offset.ens
-            new_offsets = mode.(eachslice(new_rx_phi_offset(ens=e), dims=:path))
-            old_offsets = mode.(eachslice(rx_phi_offset(ens=e), dims=:path))
-            yb(field=:phase, ens=e) .+= circular_diff.(new_offsets, old_offsets) .* (π/2)
-            # We apply the mode, subtracting the offsets already applied in ensemble_model, as the indicator of the most likely phase offset.
-            # With modulo 4 discrete variables, where intermediate values between the integer values are meaningless, 
-            # mean is not a good measure of central tendency, and mode is more appropriate. 
-        end
-    end
- 
-    return new_tx_pwrs, new_rx_phi_offset
+
+    return new_tx_pwrs
 end
- 
  
 """
     xy_only_update(yb, xy_state, y, R; ρ, localization, datatypes) → xy_state_a
@@ -408,52 +433,6 @@ function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_
             tx_pwrs_a(pwrs=tx) .= (strip(xnew_amp(pwrs=tx)))
         end
     end
-end
-
-function split_rx_update!(yb, rx_phi_offset_b, rx_phi_offset_a, y, R, ρ, npaths, split_ens_size, pathnames)
-    split_yb = KeyedArray(
-        Array{Float64,3}(undef, 2, npaths, split_ens_size),
-        field = [:amp, :phase],
-        path  = pathnames,
-        ens   = 1:split_ens_size,
-    )
-
-    for ee in split_yb.ens
-        split_yb(ens=ee) .= yb #broadcast to split_ens_size
-    end
-
-    split_rx_phi_offset = KeyedArray(
-        fill(NaN, npaths, split_ens_size), 
-        path = pathnames, 
-        ens=1:split_ens_size
-        )
-    #needed because rx_phi_offset_update requires structure with dimesion ens, not split_ens. Currently keeping both so (dual_)rx_phi_offset can be mutated for all ensembles.
-    # Compute mode per path before the perturbation loop
-    # We use the mode here because ensemble_model!() uses the mode when computing the modeled measurements.
-    # This means we have to use deviation from the mode when calculating the Y matrix for the LETKF update.
-    mode_offset = mode.(eachslice(rx_phi_offset_b, dims=:path))
-
-    for ee in rx_phi_offset_b.split_ens
-        split_yb(field=:phase, ens=ee) .+= 
-            circular_diff.(rx_phi_offset_b(split_ens=ee), mode_offset) .* (π/2)
-    end
-
-    split_ybar = mean(split_yb, dims=:ens)
-
-    split_Y = similar(split_yb)
-    split_Y(:amp)   .= split_yb(field=:amp) .- split_ybar(:amp)
-    split_Y(:phase) .= phasediff.(split_yb(field=:phase), split_ybar(:phase))
-
-    for p in rx_phi_offset_b.path
-        split_rx_phi_offset(path=p) .= strip(rx_phi_offset_b(path=p)) 
-    end
-
-    xnew_phi = rx_phi_update(split_rx_phi_offset, y, split_ybar, split_Y, R; ρ = ρ)
-
-    for p in rx_phi_offset_a.path
-        rx_phi_offset_a(path=p) .= mod.(round.(strip(xnew_phi(path=p))), 4) #force to integer values ∈ [0, 3]
-    end
-    
 end
 
 """
@@ -617,134 +596,6 @@ function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1)
     return tx_pwrs_a
 end
 
-
-"""
-    rx_phi_update(tx_pwrs, y, ybar, Y, R; ρ=1.1) → tx_pwrs_a
-    Perform LETKF analysis update on only the `tx_pwrs` bias offset state variable, given the measurements `y`,
-    mean of the modeled measurements `ybar`, ensemble differences from that mean `Y`, and the observation noise covariance `R`.
-"""
-function rx_phi_update(rx_phi_offset, y, ybar, Y, R; ρ=1.1)
-    
-    missing_paths = setdiff(rx_phi_offset.path, y.path)
-    #check that all paths in rx_phi_offset are in y.path
-    if isempty(missing_paths)
-        # ok
-    else
-        error("Missing entries from y.path: $(missing_paths)")
-    end
-
-    if !(:field in dimnames(Y))
-        #Stacked/Dual update removes the field dimension, causing breakage here.
-        #TODO determine why this behavior changed when first adding the different filtertype functions
-        Y = KeyedArray(
-           reshape(Y, size(Y, :path), size(Y, :ens), 1);
-           path  = axiskeys(Y, :path),
-           ens   = axiskeys(Y, :ens),
-           field = [:phase]          # singleton dimension
-        )
-    end
-
-    npaths = length(y.path)
-    ens_size = length(rx_phi_offset.ens)
-
-    # 2.
-    #=
-    θ = rx_phi_offset .* (π/2)
-    zc = cos.(θ)
-    zs = sin.(θ)
-    zbar_c = mean(zc, dims=:ens)
-    zbar_s = mean(zs, dims=:ens)
-    Xc = zc .- zbar_c
-    Xs = zs .- zbar_s
-    =#
-    rx_phibar = mean(rx_phi_offset,dims=:ens)
-    #Mean is just used to create a structure of the correct dimensions
-
-    for p in rx_phi_offset.path
-        rx_phibar(path=p) .= robust_zero_sum_center(rx_phi_offset(path=p))
-        #rx_phibar(path=p).= circular_mean(rx_phi_offset(path=p))
-        #rx_phibar(path=p) .= mean(rx_phi_offset(path=p))
-        #rx_phibar(path=p).= mode(rx_phi_offset(path=p))
-        #=
-        center = mean(rx_phi_offset(path=p))
-        perturbs = circular_diff.(rx_phi_offset(path=p), center)
-        correction = mean(perturbs)
-        rx_phibar(path=p) .= center + correction
-        =#
-    end
-
-    Xrx_phi = similar(rx_phi_offset)
-    for e in rx_phi_offset.ens
-        #perturbs = circular_diff.(rx_phi_offset(ens=e), dropdims(rx_phibar, dims=:ens))
-        #Xrx_phi(ens=e) .= perturbs .- mean(perturbs) 
-        #Xrx_phi(ens=e) .= dropdims(circular_diff.(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
-        Xrx_phi(ens=e) .= dropdims(balanced_circular_diff(rx_phi_offset(ens=e),rx_phibar),dims=:ens)
-    end
-    
-
-    #For localizing RX phase offset state variable, we consider only phase data 
-    #from the current path.
-    rx_phi_offset_a = similar(rx_phi_offset)
-    for n in 1:npaths
-        p_string = String(rx_phi_offset.path[n])
-        # Currently localization is binary (cell is included or not)
-        loc_mask = BitVector()
-        loc_mask = BitVector([s == p_string for s in y.path])
-
-        # Localize and flatten measurements
-        ybar_loc = ybar(path=Index(loc_mask), field=:phase)
-        Y_loc = Y(path=Index(loc_mask), field=:phase)
-        y_loc = y(path=Index(loc_mask), field=:phase)
-
-        # Indices of R to be copied to R_loc depends on whether R has amp and phase measurement covariances or just phase. 
-        # Regardless, only phase is used to update rx_phi_offset
-        if length(R) == length(rx_phi_offset.path)
-            R_loc = @views Diagonal(R[1:end][loc_mask])
-        elseif length(R) == 2*length(rx_phi_offset.path)
-            R_loc = @views Diagonal(R[npaths+1:end][loc_mask])
-        else
-            error("Length of R must be equal to number of paths or twice the number of paths. Length of R: $(length(R)), number of paths: $(length(rx_phi_offset.path))")
-        end
-        # 4.
-        C = transpose(strip(Y_loc))/R_loc
-
-        # 5.
-        # Can apply ρ here if H is linear, or if ρ is close to 1
-        Patilde = inv(Hermitian((ens_size - 1)*I/ρ + C*Y_loc)) #Possibly persue explicit symmetric construction and use / rather than inv()
-
-        # 6.
-        # Symmetric square root
-        Wa = sqrt((ens_size - 1)*Hermitian(Patilde))
-
-        # 7.
-        Δ = phasediff.(y_loc, ybar_loc)
-        
-        wabar = Patilde*C*Δ
-        wa = Wa .+ wabar
-
-        # 8.
-        rx_phibar_loc = rx_phibar(path = p_string)
-        Xrx_phi_loc = transpose(Xrx_phi(path = p_string, ens = Index(Xrx_phi.ens))) # Transpose necessary because Julia flattens 1xk to (k,)
-
-        rx_phi_offset_a(path = p_string) .= transpose(parent(parent(Xrx_phi_loc*wa .+ rx_phibar_loc)))
-        #=
-        # Stack (cos, sin) rows for this path; shape (2, ens_size)
-        Xloc_c = transpose(parent(parent(Xc(path=p_string))))
-        Xloc_s = transpose(parent(parent(Xs(path=p_string))))
-        X2 = vcat(Xloc_c, Xloc_s)          # 2 × ens_size
-
-        zbar2 = [only(zbar_c(path=p_string)); only(zbar_s(path=p_string))]
-        z_a = X2*wa .+ zbar2               # 2 × ens_size (one column per member)
-
-        # Project back: angle → quarter-turn count in [0,4). Downstream `round`+`mod 4` snaps to {0,1,2,3}.
-        θa = atan.(z_a[2,:], z_a[1,:])
-        rx_phi_offset_a(path=p_string) .= mod.(θa ./ (π/2), 4)
-        =#
-    end
-
-    return rx_phi_offset_a
-end
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Categorical RX-offset update path
 #
@@ -873,6 +724,70 @@ function posterior_resample_correct!(yb, rx_phi_offset, rx_log_post, rng;
     end
 
     return rx_phi_offset
+end
+
+"""
+    _draw_prior_rx_offsets!(rx_phi_offset, rx_log_post, rng;
+                            commit_threshold=1.0, period=4) → rx_phi_offset
+
+Fill `rx_phi_offset` (`KeyedArray(path, ens)`) with per-member integer offsets
+drawn from the current per-path categorical posterior `rx_log_post`
+(`KeyedArray(path, Bϕ)`). Thin `KeyedArray` wrapper over [`sample_rx_offsets!`].
+
+Called by each `LETKF_*_update` *before* the forward model so that the ensemble
+of modeled phases honestly marginalizes over Bϕ — every member is paired with an
+independently drawn offset, which the standard `ensemble_model!` then bakes into
+`yb(:phase)`.
+"""
+function _draw_prior_rx_offsets!(rx_phi_offset, rx_log_post, rng;
+                                 commit_threshold=1.0, period=4)
+    npaths   = length(rx_phi_offset.path)
+    ens_size = length(rx_phi_offset.ens)
+    sampled  = Matrix{Float64}(undef, npaths, ens_size)
+    sample_rx_offsets!(sampled, rx_log_post, rng;
+                       commit_threshold=commit_threshold, period=period)
+    for e in 1:ens_size
+        rx_phi_offset(ens=e) .= view(sampled, :, e)
+    end
+    return rx_phi_offset
+end
+
+"""
+    categorical_rx_measupdate!(rx_log_post, yb, rx_phi_offset, y, R, rng;
+                               η=1.0, commit_threshold=1.0,
+                               correct_yb=true, period=4)
+        → (rx_phi_offset, rx_log_post)
+
+Single-call categorical RX measurement update for use inside the
+`LETKF_*_update` dispatchers — the categorical analogue of the (removed)
+`rx_phi_update`.
+
+Two steps:
+1. [`categorical_rx_update!`] folds this iteration's phase observation into the
+   persistent per-path log-posterior `rx_log_post` (mutated in place).
+2. Per-(path, ens) offsets are refreshed from the *updated* posterior.
+
+`correct_yb` selects between the two filter behaviors:
+- `true`  (dual / split): [`posterior_resample_correct!`] shifts `yb(:phase)` in
+  place so a subsequent `xy_state` update consumes post-evidence offsets.
+- `false` (stacked): `yb` is left untouched — the `xy_state` update sees the
+  prior `yb` — and only `rx_phi_offset` is refreshed (for saving and the next
+  iteration's forward model).
+
+`rx_log_post` is mutated in place; the caller passes the carried-forward
+posterior. Returns `(rx_phi_offset, rx_log_post)` for merging into `updated_fields`.
+"""
+function categorical_rx_measupdate!(rx_log_post, yb, rx_phi_offset, y, R, rng;
+                                    η=1.0, commit_threshold=1.0,
+                                    correct_yb::Bool=true, period=4)
+    categorical_rx_update!(rx_log_post, yb, rx_phi_offset, y, R; period=period, η=η)
+
+    if correct_yb
+        posterior_resample_correct!(yb, rx_phi_offset, rx_log_post, rng;
+                                    commit_threshold=commit_threshold, period=period)
+    end
+
+    return rx_phi_offset, rx_log_post
 end
 
 """
