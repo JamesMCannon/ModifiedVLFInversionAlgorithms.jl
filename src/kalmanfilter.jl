@@ -790,66 +790,6 @@ function categorical_rx_measupdate!(rx_log_post, yb, rx_phi_offset, y, R, rng;
     return rx_phi_offset, rx_log_post
 end
 
-"""
-    ensemble_model!(ym, f, x::NamedTuple, rx_log_post, rng)
-
-Categorical-path variant of `ensemble_model!`. Identical to the standard
-`NamedTuple` method except that the per-member rx offset added to `ym(:phase)`
-is **sampled from the current per-path posterior** `rx_log_post` rather than
-read from `x.rx_phi_offset` directly.
-
-This implements the marginalization-over-Bϕ step: each ensemble member of
-`xy_state` is paired with an independently-drawn `Bϕ` per path, so the
-ensemble of modeled phases honestly represents joint uncertainty in `(x, Bϕ)`.
-The drawn offsets are written into `x.rx_phi_offset(ens=e)` so that downstream
-consumers (saving, heatmaps, the next iteration's `categorical_rx_update!`)
-see a consistent record of what was actually used.
-
-`x.rx_phi_offset` is expected to have dims `(path, ens)` — the categorical
-path does not use the `:split_ens` dimension.
-"""
-function ensemble_model!(ym, f, x::NamedTuple, rx_log_post, rng; commit_threshold=1.0)
-    haskey(x, :rx_phi_offset) ||
-        error("ensemble_model! categorical variant requires x.rx_phi_offset")
-    :split_ens in dimnames(x.rx_phi_offset) &&
-        error("ensemble_model! categorical variant does not support :split_ens dimension")
-
-    npaths = length(x.rx_phi_offset.path)
-    ens_size = length(x.xy_state.ens)
-
-    # Per-path: sample if posterior is uncertain, deterministically use MAP if it
-    # exceeds `commit_threshold`. Pre-build the (path × ens) offset matrix so the
-    # threaded forward-model loop never touches `rng`.
-    sampled = Matrix{Float64}(undef, npaths, ens_size)
-    sample_rx_offsets!(sampled, rx_log_post, rng; commit_threshold=commit_threshold)
-    for e in 1:ens_size
-        x.rx_phi_offset(ens=e) .= view(sampled, :, e)
-    end
-
-    @showprogress Threads.@threads for e in x.xy_state.ens
-        xy_state = x.xy_state(ens=e)
-
-        ens_state = NamedTuple()
-        ens_state = merge(ens_state, (; xy_state))
-        if haskey(x, :tx_pwrs)
-            tx_pwrs = x.tx_pwrs(ens=e)
-            ens_state = merge(ens_state, (; tx_pwrs))
-        end
-
-        a, p = f(ens_state)
-        ym(:amp)(ens=e) .= a
-        ym(:phase)(ens=e) .= p
-
-        # Apply the per-member sampled offsets for this iteration
-        ym(field=:phase, ens=e) .+= x.rx_phi_offset(ens=e) .* (π/2)
-    end
-
-    for pth in ym.path
-        ym(:phase)(path=pth) .= modgaussian(ym(:phase)(path=pth))
-    end
-
-    return ym
-end
 
 """
     ensemble_model!(ym, f, x)

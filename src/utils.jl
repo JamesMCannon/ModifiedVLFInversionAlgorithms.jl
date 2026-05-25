@@ -52,18 +52,6 @@ function phasediff(a, b; deg=false)
 end
 
 """
-    circular_mean(x; period=4)
-Compute the circular mean of `x` with given `period`.
-Used in the caclulations of mean phase offset values.
-"""
-function circular_mean(x; period=4)
-    θ = 2π .* x ./ period
-    μθ = atan(mean(sin.(θ)), mean(cos.(θ)))
-    μ = period * μθ / (2π)
-    return mod(μ, period)
-end
-
-"""
     circular_diff(b, a; period=4)
 Compute the circular difference `b - a` with given `period`.
 Used in the phase offsets in the RX offset state vector.
@@ -72,8 +60,6 @@ TODO : unify with `phasediff`?
 function circular_diff(b, a; period=4)
     return mod(b - a + period/2, period) - period/2
 end
-
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Categorical RX-offset inference helpers
