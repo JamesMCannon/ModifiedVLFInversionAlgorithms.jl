@@ -27,6 +27,25 @@ function rebuildpaths(paths, tx_pwrs)
 end
 
 """
+    circular_phase_stats(φ) → (ybar, Y)
+
+Anchored circular mean and exactly-centered perturbations for a phase
+ensemble `φ` (radians, any branch). `ref` is the resultant-vector mean;
+deviations are wrapped about it via `phasediff` and re-centered so that
+`sum(Y) == 0` exactly (the ETKF assumes zero-mean columns). Replaces the
+arithmetic `mean`/`phasediff`-against-mean pair, which is branch-sensitive
+for offset-multimodal ensembles.
+"""
+function circular_phase_stats(φ::AbstractVector)
+    C = mean(cos, φ)
+    S = mean(sin, φ)
+    ref = atan(S, C)
+    d = phasediff.(φ, ref)   # wrapped deviations in (−π, π]
+    m = mean(d)
+    return ref + m, d .- m
+end
+
+"""
     phasediff(a, b; deg=false)
 
 Compute the smallest angle `a - b` in radians if `deg=false`, otherwise degrees.

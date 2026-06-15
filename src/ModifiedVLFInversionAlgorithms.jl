@@ -21,7 +21,7 @@ export gaspari1999_410, lonlatgrid_dists, obs2grid_diamondpill, obs2grid_distanc
     modgaussian, build_xygrid, pathname, densify, gaussianstddev, compactlengthscale,
     dense_grid, mediandr, filterbounds!, obs2grid_distances, rebuildpaths
 export totalvariation, tikhonov_gradient, l2norm, objective, hubernorm, pseudohubernorm
-export phasediff
+export phasediff, circular_phase_stats
 
 const RNG = MersenneTwister(1234)
 

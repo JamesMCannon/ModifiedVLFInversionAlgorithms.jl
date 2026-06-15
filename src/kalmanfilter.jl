@@ -164,21 +164,25 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
 
     # 1. Ensemble measurements
     yb = H(xb)
-    ybar = mean(yb, dims=:ens)
+    ybar = mean(yb, dims=:ens)   # correct for :amp; :phase overwritten below
 
     # 2. Centered measurement perturbations
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
+    Y = similar(yb)
+    if :amp in datatypes
         Y(:amp) .= yb(:amp) .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
-    else
+    end
+    if :phase in datatypes
+        for p in yb.path
+            m, Yp = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
+            ybar(field=:phase, path=p) .= m
+            Y(field=:phase, path=p)    .= Yp
+        end
+    end
+    if !(:amp in datatypes) && !(:phase in datatypes)
         error("Unknown datatypes: $datatypes")
     end
-
+    ybar = mean(yb, dims=:ens)
+    
     # 3. Update each field if it exists, starting with the bias parameters
     updated_fields = NamedTuple()
     
@@ -212,19 +216,21 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
         updated_fields = merge(updated_fields, (; rx_phi_offset, rx_phi_logpost))
     end
 
-    # Recompute Y after applying bias updates to yb
-    ybar = mean(yb, dims=:ens)
+   # Recompute Y after applying bias updates to yb
+    ybar = mean(yb, dims=:ens)   # correct for :amp; :phase overwritten below
 
-    # Centered measurement perturbations
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
+    Y = similar(yb)
+    if :amp in datatypes
         Y(:amp) .= yb(:amp) .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
-    else
+    end
+    if :phase in datatypes
+        for p in yb.path
+            m, Yp = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
+            ybar(field=:phase, path=p) .= m
+            Y(field=:phase, path=p)    .= Yp
+        end
+    end
+    if !(:amp in datatypes) && !(:phase in datatypes)
         error("Unknown datatypes: $datatypes")
     end
     
