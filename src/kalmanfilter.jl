@@ -38,6 +38,13 @@ function LETKF_measupdate(H, xb, y, R;
     
     ybar = mean(yb, dims=:ens)
 
+    if :phase in datatypes
+        for p in yb.path
+            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
+            ybar(field=:phase, path=p) .= ref_m
+        end
+    end
+
     if :amp in datatypes && :phase in datatypes
         Y = similar(yb)
         Y(:amp) .= yb(:amp) .- ybar(:amp)
@@ -105,6 +112,12 @@ function LETKF_stacked_update(H, xb::NamedTuple, y, R;
     # 1. Ensemble measurements (prior offsets, if any, are baked into yb by ensemble_model!)
     yb = H(xb)
     ybar = mean(yb, dims=:ens)
+    if :phase in datatypes
+        for p in yb.path
+            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
+            ybar(field=:phase, path=p) .= ref_m
+        end
+    end
 
     # 2. Centered measurement perturbations
     if :amp in datatypes && :phase in datatypes
@@ -167,22 +180,26 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
     ybar = mean(yb, dims=:ens)   # correct for :amp; :phase overwritten below
 
     # 2. Centered measurement perturbations
-    Y = similar(yb)
-    if :amp in datatypes
-        Y(:amp) .= yb(:amp) .- ybar(:amp)
-    end
     if :phase in datatypes
         for p in yb.path
-            m, Yp = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
-            ybar(field=:phase, path=p) .= m
-            Y(field=:phase, path=p)    .= Yp
+            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
+            ybar(field=:phase, path=p) .= ref_m
         end
     end
-    if !(:amp in datatypes) && !(:phase in datatypes)
+
+    # Centered measurement perturbations (original shapes preserved)
+    if :amp in datatypes && :phase in datatypes
+        Y = similar(yb)
+        Y(:amp)   .= yb(:amp)   .- ybar(:amp)
+        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
+    elseif :amp in datatypes
+        Y = yb(:amp) .- ybar(:amp)
+    elseif :phase in datatypes
+        Y = phasediff.(yb(:phase), ybar(:phase))
+    else
         error("Unknown datatypes: $datatypes")
     end
-    ybar = mean(yb, dims=:ens)
-    
+
     # 3. Update each field if it exists, starting with the bias parameters
     updated_fields = NamedTuple()
     
@@ -219,18 +236,23 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
    # Recompute Y after applying bias updates to yb
     ybar = mean(yb, dims=:ens)   # correct for :amp; :phase overwritten below
 
-    Y = similar(yb)
-    if :amp in datatypes
-        Y(:amp) .= yb(:amp) .- ybar(:amp)
-    end
-    if :phase in datatypes
+   if :phase in datatypes
         for p in yb.path
-            m, Yp = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
-            ybar(field=:phase, path=p) .= m
-            Y(field=:phase, path=p)    .= Yp
+            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
+            ybar(field=:phase, path=p) .= ref_m
         end
     end
-    if !(:amp in datatypes) && !(:phase in datatypes)
+
+    # Centered measurement perturbations (original shapes preserved)
+    if :amp in datatypes && :phase in datatypes
+        Y = similar(yb)
+        Y(:amp)   .= yb(:amp)   .- ybar(:amp)
+        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
+    elseif :amp in datatypes
+        Y = yb(:amp) .- ybar(:amp)
+    elseif :phase in datatypes
+        Y = phasediff.(yb(:phase), ybar(:phase))
+    else
         error("Unknown datatypes: $datatypes")
     end
     
@@ -366,6 +388,13 @@ function xy_only_update(yb, xy_state, y, R;
  
     ybar = mean(yb, dims=:ens)
  
+    if :phase in datatypes
+        for p in yb.path
+            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
+            ybar(field=:phase, path=p) .= ref_m
+        end
+    end
+
     if :amp in datatypes && :phase in datatypes
         Y = similar(yb)
         Y(:amp) .= yb(:amp) .- ybar(:amp)
@@ -417,6 +446,10 @@ function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_
     end
 
     split_ybar = mean(split_yb, dims=:ens)
+    for p in split_ybar.path
+        ref_m, _ = circular_phase_stats(parent(parent(split_yb(field=:phase, path=p))))
+        split_ybar(field=:phase, path=p) .= ref_m
+    end
 
     split_Y = similar(split_yb)
     split_Y(:amp)   .= split_yb(field=:amp) .- split_ybar(:amp)
