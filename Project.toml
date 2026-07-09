@@ -1,7 +1,7 @@
 name = "ModifiedVLFInversionAlgorithms"
-uuid = "0803ec96-7665-482a-9427-2785addca038"
+uuid = "325dd450-e17c-4c65-9110-778031d3fbdc"
 authors = ["James Cannon <87723939+JamesMCannon@users.noreply.github.com>", "Forrest Gasdia <17058025+fgasdia@users.noreply.github.com>"]
-version = "0.0.15"
+version = "0.1.0"
 
 [deps]
 AxisKeys = "94b1ba4f-4ee9-5380-92f1-94cde586c3c5"

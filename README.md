@@ -1,10 +1,12 @@
 # ModifiedVLFInversionAlgorithms.jl
 
-Forked from https://github.com/fgasdia/SubionosphericVLFInversionAlgorithms.jl [![DOI](https://zenodo.org/badge/355639135.svg)](https://zenodo.org/badge/latestdoi/355639135)
+Initially copied from https://github.com/fgasdia/SubionosphericVLFInversionAlgorithms.jl [![DOI](https://zenodo.org/badge/355639135.svg)](https://zenodo.org/badge/latestdoi/355639135)
 
 Algorithms to invert VLF signals to estimate the D-region ionosphere.
 
 Includes functions to run forward models and interpolate from geographically grided state representations (h′ and β at control points on a map) to propagation paths.
 
 Exclusively using the [LongwaveModePropagator.jl]([url](https://github.com/fgasdia/LongwaveModePropagator.jl)) as the forward model.
+
+Includes functions to estimate transmitter power and per-path quarter turn phase offsets. 
  
