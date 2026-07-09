@@ -48,6 +48,7 @@ function _model_observation(tx, rx; pathstep=100e3)
     input.ground_sigmas = similar(input.segment_ranges)
     input.ground_epsrs = Vector{Int}(undef, length(wpts))
     input.frequency = tx.frequency.f
+    input.power = tx.power
 
     # NOTE: if changing `output_ranges` step, must also update in `model`!
     input.output_ranges = collect(0:5e3:round(range(tx, rx)+10e3, digits=-4, RoundUp))
@@ -67,7 +68,9 @@ function model_observation(itp::GeoStatsInterpolant, geox, tx, rx, datetime; pat
     input, wpts = _model_observation(tx, rx; pathstep)
 
     # Projected wpts
-    trans = Proj.Transformation(wgs84(), itp.projection)
+    trans = lock(proj_lock) do 
+        Proj.Transformation(wgs84(), itp.projection)
+    end
     pts = PointSet(trans.(getindex.(wpts, :lon), getindex.(wpts, :lat)))
 
     problem = EstimationProblem(geox, pts, (:h, :b))
@@ -103,7 +106,9 @@ function model_observation(itp::ScatteredInterpolant, hitp, bitp, tx, rx, dateti
     input, wpts = _model_observation(tx, rx; pathstep)
 
     # Projected wpts
-    trans = Proj.Transformation(wgs84(), itp.projection)
+    trans = lock(proj_lock) do 
+        Proj.Transformation(wgs84(), itp.projection)
+    end
     pts = PointSet(trans.(getindex.(wpts, :lon), getindex.(wpts, :lat)))
 
     geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
@@ -194,8 +199,8 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
     end
 
    
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
-    
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+    #TODO: Dynamically set grpfparams tolerance based on hprimes, betas, and frequency to speed up LMP runs without sacrificing accuracy.
 
     amps = Vector{Float64}(undef, length(paths))
     phases = similar(amps)
@@ -240,7 +245,7 @@ function model(itp::ScatteredInterpolant, x, paths, datetime;
     end
 
    
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
     
 
     amps = Vector{Float64}(undef, length(paths))
@@ -290,7 +295,7 @@ function model(hbfcn::Function, paths, datetime;
     end
 
 
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true))
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
     
 
     amps = Vector{Float64}(undef, length(paths))
@@ -311,6 +316,7 @@ function model(hbfcn::Function, paths, datetime;
 
     return amps, phases
 end
+
 
 function lonlatsegment(lon, lat, dist, dt, hbfcn, nufcn, bfcn, gfcn)
     h, b = hbfcn(lon, lat, dt)

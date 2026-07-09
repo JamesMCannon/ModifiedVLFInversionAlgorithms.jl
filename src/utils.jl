@@ -5,6 +5,46 @@ Return path name string for (transmitter, receiver) path tuple `p`.
 """
 pathname(p) = p[1].name*"-"*p[2].name
 
+
+"""
+    rebuildpaths()
+
+Given a vector of `(Transmitter, Receiver)` propagation paths used in the scenarios,
+modify the power of the Transmitters using the values found in the NamedTuple tx_pwrs.
+tx_pwrs should be a slice of a KeyedArray and indexed by "pwrs = :calsign", ie tx_pwrs(pwrs = :NLK) 
+would return the desired new power for the NLK transmitter.
+"""
+function rebuildpaths(paths, tx_pwrs)
+    #TODO Consider moving this to the RunLETKF code
+    revised_paths = map(paths) do (tx, rx)
+        new_tx = LongwaveModePropagator.Transmitter{VerticalDipole}(
+            tx.name, tx.latitude, tx.longitude, tx.antenna, tx.frequency,
+            tx_pwrs(pwrs = Symbol(tx.name))
+        )
+        (new_tx, rx)
+    end
+    return revised_paths
+end
+
+"""
+    circular_phase_stats(φ) → (ybar, Y)
+
+Anchored circular mean and exactly-centered perturbations for a phase
+ensemble `φ` (radians, any branch). `ref` is the resultant-vector mean;
+deviations are wrapped about it via `phasediff` and re-centered so that
+`sum(Y) == 0` exactly (the ETKF assumes zero-mean columns). Replaces the
+arithmetic `mean`/`phasediff`-against-mean pair, which is branch-sensitive
+for offset-multimodal ensembles.
+"""
+function circular_phase_stats(φ::AbstractVector)
+    C = mean(cos, φ)
+    S = mean(sin, φ)
+    ref = atan(S, C)
+    d = phasediff.(φ, ref)   # wrapped deviations in (−π, π]
+    m = mean(d)
+    return ref + m, d .- m
+end
+
 """
     phasediff(a, b; deg=false)
 
@@ -28,6 +68,147 @@ function phasediff(a, b; deg=false)
     end
 
     return d
+end
+
+"""
+    circular_diff(b, a; period=4)
+Compute the circular difference `b - a` with given `period`.
+Used in the phase offsets in the RX offset state vector.
+TODO : unify with `phasediff`?
+"""
+function circular_diff(b, a; period=4)
+    return mod(b - a + period/2, period) - period/2
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Categorical RX-offset inference helpers
+#
+# These support the alternate `rx_method=:categorical` path in runletkf, which
+# treats `rx_phi_offset` as a per-path categorical Bϕ ∈ {0,1,2,3} representing
+# the MSK 90° demodulation ambiguity rather than as a continuous LETKF state.
+# Pure functions only — no dependency on filter loop state.
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    logsumexp(x)
+
+Numerically stable `log(sum(exp.(x)))` for any iterable `x`. Two-pass: one to
+find the max, one to accumulate. Generator-safe — does not require `x` to be
+indexable. Returns `-Inf` if all elements are `-Inf`.
+"""
+function logsumexp(x)
+    m = -Inf
+    for xi in x
+        xi > m && (m = xi)
+    end
+    isfinite(m) || return m
+    s = 0.0
+    for xi in x
+        s += exp(xi - m)
+    end
+    return m + log(s)
+end
+
+"""
+    rx_phi_loglikelihood(yb_phase_path::AbstractVector, y_phase_path::Real, σ²; period=4)
+        → Vector{Float64} of length `period`
+
+For a single path, given the ensemble of modeled phases `yb_phase_path`
+(length `ens_size`, *without* any rx offset baked in — see note), the scalar
+observed phase `y_phase_path`, and observation variance `σ²`, return the
+log-likelihood of each candidate offset `Bϕ ∈ 0:period-1` after marginalizing
+over the ensemble.
+
+The marginalization is
+
+    ℓ(Bϕ) = log( (1/N) · Σ_e exp[ -½ · phasediff(y, yb_e + Bϕ·π/2)² / σ² ] )
+
+i.e. logsumexp over members of the per-member Gaussian log-likelihood, minus
+log(N). The minus-log(N) is a `Bϕ`-independent constant that drops out of the
+posterior after normalization, so it can safely be omitted; we keep it so the
+returned numbers are interpretable as honest log-likelihoods.
+
+# Note on `yb_phase_path`
+This expects `yb` *without* the current ensemble's rx-offset contribution mixed
+in — i.e. the raw forward-model output for this path. If the calling site has
+`yb` with offsets already added (as `ensemble_model!` does in the categorical
+path), it must subtract them before calling this function. See
+`categorical_rx_update!` for the canonical usage.
+"""
+function rx_phi_loglikelihood(yb_phase_path, y_phase_path, σ²; period=4)
+    ℓ = Vector{Float64}(undef, period)
+    N = length(yb_phase_path)
+    invN_log = -log(N)
+    quarter = π / (period / 2)  # = π/2 for period=4
+    #σ²_model = var(yb_phase_path)  # per path, per iteration
+    #σ²_eff = σ² + σ²_model
+    for Bϕ in 0:period-1
+        offset_rad = Bϕ * quarter
+        ℓ[Bϕ+1] = invN_log + logsumexp(
+            -0.5 * phasediff(y_phase_path, yb_e + offset_rad)^2 / σ²
+            for yb_e in yb_phase_path
+        )
+    end
+    return ℓ
+end
+
+"""
+    rx_phi_sample(log_post_path, n, rng; period=4)
+        → Vector{Int} of length `n`, values in `0:period-1`
+
+Sample `n` integer offsets independently from the categorical posterior whose
+unnormalized log-probabilities are `log_post_path` (length `period`). Used by
+the categorical-path `ensemble_model!` to assign a per-member offset that
+honestly represents the current uncertainty in `k_p`.
+"""
+function rx_phi_sample(log_post_path, n, rng; period=4)
+    m = maximum(log_post_path)
+    w = exp.(log_post_path .- m)
+    w ./= sum(w)
+    return [sample(rng, 0:period-1, Weights(w)) for _ in 1:n]
+end
+
+"""
+    rx_phi_posterior(log_post_path) → Vector{Float64}
+
+Normalize unnormalized log-posterior `log_post_path` to a probability vector
+summing to 1. Convenience for diagnostics and heatmap generation.
+"""
+function rx_phi_posterior(log_post_path)
+    m = maximum(log_post_path)
+    w = exp.(log_post_path .- m)
+    return w ./ sum(w)
+end
+
+"""
+    sample_rx_offsets!(offset_matrix, rx_log_post, rng;
+                       commit_threshold=1.0, period=4) → offset_matrix
+
+Fill `offset_matrix::AbstractMatrix{<:Real}` of size `(npaths, ens_size)` with
+per-(path, ens) integer offsets drawn from the per-path categorical posterior
+encoded by `rx_log_post::KeyedArray(path, Bϕ)`. Paths whose normalized posterior
+maximum exceeds `commit_threshold` deterministically receive the MAP Bϕ for every
+ensemble member; all other paths sample independently per member.
+
+Mirrors the per-path sampling logic embedded in the categorical-path
+`ensemble_model!` so both the forward-model offset assignment and the
+post-update `posterior_resample_correct!` call share one implementation.
+"""
+function sample_rx_offsets!(offset_matrix::AbstractMatrix, rx_log_post, rng;
+                            commit_threshold=1.0, period=4)
+    npaths, ens_size = size(offset_matrix)
+    @assert length(rx_log_post.path) == npaths "sample_rx_offsets!: path count mismatch ($(length(rx_log_post.path)) vs $npaths)"
+    for (n, p) in enumerate(rx_log_post.path)
+        log_post_p   = collect(rx_log_post(path=p))
+        post_p       = rx_phi_posterior(log_post_p)
+        max_p, Bϕ_map = findmax(post_p)
+        if max_p ≥ commit_threshold
+            offset_matrix[n, :] .= Bϕ_map - 1     # findmax is 1-based; offsets are 0-based
+        else
+            offset_matrix[n, :] .= rx_phi_sample(log_post_p, ens_size, rng; period=period)
+        end
+    end
+    return offset_matrix
 end
 
 """
