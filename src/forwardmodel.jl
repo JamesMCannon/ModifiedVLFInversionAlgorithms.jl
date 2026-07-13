@@ -30,6 +30,42 @@ const ZH_DBUVM_TO_B_DBPT = 20log10(1e6 / LMP.C0)  # ≈ -49.5364 dB
 # Magnetic field components as returned in LMP's normalized Z₀H units
 const H_COMPONENTS = (Fields.Hz, Fields.Hy, Fields.Hx)
 
+# Observable fields derived from the complex component ratio Hx/Hy. Requesting either
+# requires the forward model to extract both Hy and Hx from a FieldsOutput.
+const DIFFERENTIAL_FIELDS = (:s2, :s3)
+
+
+"""
+    polarization_s2s3(amp_y, phase_y, amp_x, phase_x) → (s2, s3)
+
+Cartesian (normalized-Stokes) coordinates of the complex component ratio
+``ρ = Hx/Hy`` from per-component amplitudes (dB, any *common* reference — the
+reference cancels in the ratio) and phases (radians):
+
+    r  = 10^((amp_x − amp_y)/20)
+    Δψ = phase_x − phase_y  (wrapped; ≡ arg ρ)
+    s2 = 2 r cos(Δψ) / (1 + r²)
+    s3 = 2 r sin(Δψ) / (1 + r²)
+
+Sign convention: `Δψ = phase_x − phase_y = arg(Hx/Hy)`. This function is the
+single source of truth for the (s2, s3) observables — both the synthetic-data
+constructor and the forward-model observation operator must build them here so
+the convention cannot drift between the two.
+
+(s2, s3) are chosen over the polar pair (γ, Δψ) because the polar chart is
+singular at ρ = 0: its noise inflates as 1/r and Δψ wraps, whereas (s2, s3)
+carry approximately constant, Gaussian, wrap-free errors for all r, degrading
+gracefully to (0, 0) on paths with negligible quasi-TE content. Both are
+invariant to TX power, TX source phase, and any demodulation-trellis phase
+offset common to the two loop channels.
+"""
+function polarization_s2s3(amp_y, phase_y, amp_x, phase_x)
+    r = exp10((amp_x - amp_y)/20)
+    Δψ = phasediff(phase_x, phase_y)
+    denom = 1 + r^2
+    return 2r*cos(Δψ)/denom, 2r*sin(Δψ)/denom
+end
+
 
 """
     _pathcurves(o, component) → (amp, phase)
@@ -56,6 +92,70 @@ function _pathcurves(o::LMP.FieldsOutput, component; Hunits_pT=true)
         amp = amp .+ ZH_DBUVM_TO_B_DBPT  # broadcast copy; never mutate the Output struct
     end
     return amp, phase
+end
+
+"""
+    _path_observables(o, tx, rx, datatypes; Hunits_pT=true) → Vector{Float64}
+
+Evaluate the requested observable fields for a single path at the receiver
+distance, in `datatypes` order:
+
+- `:amp`   — Hy amplitude (dB pT when `Hunits_pT=true`)
+- `:phase` — Hy phase (rad)
+- `:s2`, `:s3` — via [`polarization_s2s3`](@ref) from the Hy and Hx curves of the
+  same `FieldsOutput` (single LMP run; both components receive the same units
+  treatment, so the dB reference cancels in the ratio)
+
+Component curves are linearly interpolated to the receiver distance and then
+combined; this matches the interpolation treatment of the single-component
+observables. Differential fields require a `FieldsOutput` computed with a
+`fieldcomponent` that includes both `Fields.Hy` and `Fields.Hx` (e.g. `Fields.H`).
+"""
+function _path_observables(o, tx, rx, datatypes; Hunits_pT=true)
+    d = range(tx, rx)
+    # NOTE: step size here should match `output_ranges` step in `model_observation`!
+    ranges = 0:5e3:last(o.output_ranges)
+
+    ay, py = _pathcurves(o, Fields.Hy; Hunits_pT)
+    Ay = linear_interpolation(ranges, ay)(d)
+    Ψy = linear_interpolation(ranges, py)(d)
+
+    need_hx = any(f -> f in DIFFERENTIAL_FIELDS, datatypes)
+    s2 = NaN
+    s3 = NaN
+    if need_hx
+        o isa LMP.FieldsOutput || throw(ArgumentError(
+            "differential observables (:s2/:s3) require a FieldsOutput carrying Hy and Hx; got $(typeof(o))"))
+        ax, px = _pathcurves(o, Fields.Hx; Hunits_pT)
+        Ax = linear_interpolation(ranges, ax)(d)
+        Ψx = linear_interpolation(ranges, px)(d)
+        s2, s3 = polarization_s2s3(Ay, Ψy, Ax, Ψx)
+    end
+
+    vals = Vector{Float64}(undef, length(datatypes))
+    for (k, f) in enumerate(datatypes)
+        vals[k] = f === :amp   ? Ay :
+                  f === :phase ? Ψy :
+                  f === :s2    ? s2 :
+                  f === :s3    ? s3 :
+                  throw(ArgumentError("Unknown observable field $f"))
+    end
+    return vals
+end
+
+"""
+    _collect_observables(output, paths, datatypes; Hunits_pT=true) → KeyedArray
+
+Assemble the `(field × path)` observable KeyedArray from a completed LMP batch
+`output`, with `field = collect(datatypes)` and `path = pathname.(paths)`.
+"""
+function _collect_observables(output, paths, datatypes; Hunits_pT=true)
+    M = Matrix{Float64}(undef, length(datatypes), length(paths))
+    for i in eachindex(paths)
+        tx, rx = paths[i]
+        M[:, i] .= _path_observables(output.outputs[i], tx, rx, datatypes; Hunits_pT)
+    end
+    return KeyedArray(M; field=collect(datatypes), path=pathname.(paths))
 end
 
 """
@@ -375,6 +475,100 @@ function model(hbfcn::Function, paths, datetime;
     end
 
     return amps, phases
+end
+
+"""
+    model_observables(itp, x, paths, datetime; pathstep=100e3, datatypes=(:amp, :phase),
+                      Hunits_pT=true) → KeyedArray(field × path)
+
+Multi-observable forward model: one LMP run per ensemble member with
+`fieldcomponent=Fields.H` (all three magnetic components computed together),
+returning the requested observable fields per path as a `(field × path)`
+KeyedArray. Hy-only fields (`:amp`, `:phase`) and differential fields
+(`:s2`, `:s3`, from the Hx/Hy ratio of the same run) come at the cost of a
+single `buildrun`, so requesting differential fields adds no LMP runtime.
+
+`datatypes` fixes the row ordering of the returned `field` axis and must match
+the observation-vector layout (see [`fieldrange`](@ref)).
+
+If `x` is a `KeyedArray`, it is transformed to a vector where the first half is
+``h′`` and the second half is ``β``, matching [`model`](@ref).
+"""
+function model_observables(itp::GeoStatsInterpolant, x, paths, datetime;
+    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true)
+
+    npts = length(x) ÷ 2
+    hprimes = x[1:npts]
+    betas = x[npts+1:end]
+
+    geox = georef((h=filter(!isnan, hprimes), b=filter(!isnan, betas)), PointSet(itp.coords))
+
+    batch = BatchInput{ExponentialInput}()
+    batch.name = "estimate"
+    batch.description = ""
+    batch.datetime = Dates.now()
+    batch.inputs = Vector{ExponentialInput}(undef, length(paths))
+
+    for i in eachindex(paths)
+        tx, rx = paths[i]
+        batch.inputs[i] = model_observation(itp, geox, tx, rx, datetime;
+            pathstep, fieldcomponent=Fields.H)
+    end
+
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+
+    return _collect_observables(output, paths, datatypes; Hunits_pT)
+end
+model_observables(itp::GeoStatsInterpolant, x::KeyedArray, paths, datetime; kwargs...) =
+    model_observables(itp, [filter(!isnan, x(:h)); filter(!isnan, x(:b))], paths, datetime; kwargs...)
+
+function model_observables(itp::ScatteredInterpolant, x, paths, datetime;
+    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true)
+
+    npts = length(x) ÷ 2
+    hprimes = x[1:npts]
+    betas = x[npts+1:end]
+
+    hitp = ScatteredInterpolation.interpolate(itp.method, itp.coords, filter(!isnan, hprimes))
+    bitp = ScatteredInterpolation.interpolate(itp.method, itp.coords, filter(!isnan, betas))
+
+    batch = BatchInput{ExponentialInput}()
+    batch.name = "estimate"
+    batch.description = ""
+    batch.datetime = Dates.now()
+    batch.inputs = Vector{ExponentialInput}(undef, length(paths))
+
+    for i in eachindex(paths)
+        tx, rx = paths[i]
+        batch.inputs[i] = model_observation(itp, hitp, bitp, tx, rx, datetime;
+            pathstep, fieldcomponent=Fields.H)
+    end
+
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+
+    return _collect_observables(output, paths, datatypes; Hunits_pT)
+end
+model_observables(itp::ScatteredInterpolant, x::KeyedArray, paths, datetime; kwargs...) =
+    model_observables(itp, [vec(x(:h)); vec(x(:b))], paths, datetime; kwargs...)
+
+function model_observables(hbfcn::Function, paths, datetime;
+    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true)
+
+    batch = BatchInput{ExponentialInput}()
+    batch.name = "estimate"
+    batch.description = ""
+    batch.datetime = Dates.now()
+    batch.inputs = Vector{ExponentialInput}(undef, length(paths))
+
+    for i in eachindex(paths)
+        tx, rx = paths[i]
+        batch.inputs[i] = model_observation(hbfcn, tx, rx, datetime;
+            pathstep, fieldcomponent=Fields.H)
+    end
+
+    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+
+    return _collect_observables(output, paths, datatypes; Hunits_pT)
 end
 
 

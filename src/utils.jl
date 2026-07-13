@@ -26,6 +26,72 @@ function rebuildpaths(paths, tx_pwrs)
     return revised_paths
 end
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Observation-vector field layout
+#
+# The observation vector is a stack of per-path blocks in the order given by
+# `datatypes`, a Tuple of field Symbols drawn from the canonical set
+# (:amp, :phase, :s2, :s3):
+#
+#     [ field₁(path 1..npaths); field₂(path 1..npaths); ... ]
+#
+# `R` (diagonal observation-error variance) shares this layout. All LETKF update
+# functions slice R and stack Y/Δ through these helpers so the layout is defined
+# in exactly one place.
+#
+# Fields listed in `PHASE_FIELDS` are circular quantities: ensemble means use
+# `circular_phase_stats` and residuals use `phasediff`. All other fields are
+# ordinary linear observables. (:s2, :s3) are Cartesian coordinates of the
+# complex component ratio Hx/Hy and are deliberately linear — the polar pair
+# (γ, Δψ) is singular as |Hx/Hy| → 0, which is the operating regime on most
+# quasi-TM-dominated paths.
+# ─────────────────────────────────────────────────────────────────────────────
+
+const PHASE_FIELDS = (:phase,)
+
+"""
+    is_phase_field(f::Symbol) → Bool
+
+Whether observable field `f` is a circular (phase-like) quantity requiring
+`circular_phase_stats` / `phasediff` treatment.
+"""
+is_phase_field(f::Symbol) = f in PHASE_FIELDS
+
+"""
+    fieldindex(f, datatypes) → Int
+
+Position of field `f` within the `datatypes` Tuple. Errors if absent.
+"""
+function fieldindex(f::Symbol, datatypes)
+    k = findfirst(==(f), datatypes)
+    isnothing(k) && throw(ArgumentError("field $f not in datatypes $datatypes"))
+    return k
+end
+
+"""
+    fieldrange(f, datatypes, npaths) → UnitRange{Int}
+
+Index range of field `f`'s per-path block within the stacked observation vector
+(and within `R`) for the layout defined by `datatypes`.
+"""
+function fieldrange(f::Symbol, datatypes, npaths::Int)
+    k = fieldindex(f, datatypes)
+    return ((k - 1)*npaths + 1):(k*npaths)
+end
+
+"""
+    stack_R(Rslice::KeyedArray, datatypes) → Vector{Float64}
+
+Flatten a `(field × path)` KeyedArray slice of the observation-error variance
+(one epoch of the per-path, per-epoch `R`) into the stacked vector layout
+consumed by the LETKF update functions. Fields are stacked in `datatypes` order;
+within each field, paths follow the slice's `path` axis order.
+"""
+function stack_R(Rslice::KeyedArray, datatypes)
+    return reduce(vcat,
+        (Vector{Float64}(parent(parent(Rslice(field=f)))) for f in datatypes))
+end
+
 """
     circular_phase_stats(φ) → (ybar, Y)
 
