@@ -20,7 +20,7 @@ export polarization_s2s3
 export wgs84, esri_102010
 export gaspari1999_410, lonlatgrid_dists, obs2grid_diamondpill, obs2grid_distance, anylocal,
     modgaussian, build_xygrid, pathname, densify, gaussianstddev, compactlengthscale,
-    dense_grid, mediandr, filterbounds!, obs2grid_distances, rebuildpaths
+    dense_grid, mediandr, exterior_mask, filterbounds!, obs2grid_distances, rebuildpaths
 export totalvariation, tikhonov_gradient, l2norm, objective, hubernorm, pseudohubernorm
 export phasediff, circular_phase_stats
 export fieldrange, stack_R, is_phase_field

@@ -192,6 +192,10 @@ See also: [`gaussianstddev`](@ref), [`gaspari1999_410`](@ref)
 """
 compactlengthscale(σ) = σ/sqrt(0.3)
 
+struct GeodesicDistance <: Distances.Metric end
+(::GeodesicDistance)(a, b) = inverse(a[1], a[2], b[1], b[2]).dist
+Distances.evaluate(d::GeodesicDistance, a, b) = d(a, b)
+
 """
     lonlatgrid_dists(lonlats)
 
@@ -522,14 +526,14 @@ function boundary_coords(paths)
 end
 
 """
-    obs2grid_distance(lonlats, paths, r=200e3, pathstep=100e3)
+    obs2grid_distance(lonlats, paths, r=200e3, pathstep=50e3)
 
 Return `localization` matrix that identifies whether or not each element of `lonlats` is
 within `r` meters of each path.
 
 See also: [`localize_distance`](@ref)
 """
-function obs2grid_distance(lonlats, paths; r=200e3, pathstep=100e3)
+function obs2grid_distance(lonlats, paths; r=200e3, pathstep=50e3)
     ngrid = length(lonlats)
     npaths = length(paths)
 
@@ -562,14 +566,14 @@ function obs2grid_distance(lonlats, paths; r=200e3, pathstep=100e3)
 end
 
 """
-    obs2grid_distances(lonlats, paths; pathstep=100e3)
+    obs2grid_distances(lonlats, paths; pathstep=50e3)
 
 Return matrix of actual distances from each path to each grid point.
 
 Like `obs2grid_distance` except it  returns actual distances instead of the result.
 TODO: combine these two functions.
 """
-function obs2grid_distances(lonlats, paths; pathstep=100e3)
+function obs2grid_distances(lonlats, paths; pathstep=50e3)
     ngrid = length(lonlats)
     npaths = length(paths)
 
@@ -609,9 +613,6 @@ Compute a kriging variance map over the grid `(x_grid, y_grid)` (assumed to be i
 length scale `range`.
 
 Cells far from every path approach the variogram sill (≈1.0); cells near a path approach 0.
-This is the same quantity computed by the plotting-side `krigingmask` in
-`gridInterpolate.jl`, just adapted to be called before an `itp` exists and on a grid that
-is already in the model projection.
 
 The returned `Matrix{Float64}` has shape `(length(y_grid), length(x_grid))`. Its linear
 (column-major) indexing matches the order produced by `densify(x_grid, y_grid)`, which is
@@ -625,36 +626,34 @@ variance map. The default of 0 (no smoothing) is appropriate for the coarse grid
 See also: [`filterbounds!`](@ref), [`densify`](@ref)
 """
 function krigingmask(paths, projection, x_grid, y_grid;
-                     pathstep=100e3, range=600e3, smooth_radius=0)
-    # Conditioning points: waypoints along every path, in WGS84.
+                              pathstep=50e3, range=600e3, smooth_radius=0)
     allwpts = Vector{Tuple{Float64,Float64}}()
     for i in eachindex(paths)
         tx, rx = paths[i][1], paths[i][2]
         _, wpts = pathpts(tx, rx; dist=pathstep)
         append!(allwpts, [(w.lon, w.lat) for w in wpts])
         push!(allwpts, (rx.longitude, rx.latitude))
-        # Extra fine-spaced point just past the transmitter — suppresses a small
-        # low-variance "dead zone" exactly at the transmitter location.
         _, near_wpts = pathpts(tx, rx; dist=pathstep/10)
         push!(allwpts, (near_wpts[2].lon, near_wpts[2].lat))
     end
 
-    # Project conditioning points into the model projection, dedup (GeoStats requires it).
-    trans = Proj.Transformation(wgs84(), projection)
+    trans = Proj.Transformation(projection, wgs84())
     uidx = unique(i -> allwpts[i], 1:length(allwpts))
-    wptpts = PointSet(trans.(allwpts[uidx]))
+    wptpts = PointSet(allwpts[uidx])
 
     # Conditioning data is identically zero — we only care about variance, not the mean.
     geox = georef((f=zeros(length(wptpts)),), wptpts)
+
     solver = Kriging(:f => (
-    variogram    = GaussianVariogram(range=range, sill=1.0, nugget=0.001),
-    mean         = 0.0,
-    neighborhood = MetricBall(3*range),
+        variogram = GaussianVariogram(MetricBall(range, GeodesicDistance());
+                                      sill=1.0, nugget=0.001),
+        mean = 0.0,
     ))
 
-    # Grid is already in `projection`, so no transform of the evaluation points.
-    grid_pts = PointSet([(x, y) for x in x_grid for y in y_grid])
-    problem  = EstimationProblem(geox, grid_pts, :f)
+    # Evaluation points carried back to lon/lat, preserving the y-fastest ordering
+    # that `filterbounds!` and `densify` both assume.
+    grid_pts = PointSet([trans((x, y)) for x in x_grid for y in y_grid])
+    problem = EstimationProblem(geox, grid_pts, :f)
     solution = solve(problem, solver)
 
     varmap = Matrix{Float64}(undef, length(y_grid), length(x_grid))
@@ -662,17 +661,65 @@ function krigingmask(paths, projection, x_grid, y_grid;
         varmap[i] = solution.f_variance[i]
     end
 
-    # NaN at conditioning points → treat as the sill (effectively "fully unknown")
+    # Near-singular covariance can (rarely) return NaN. Sill masks the cell instead of passing it.
     varmap = replace(x -> isnan(x) ? 1.0 : x, varmap)
 
     if smooth_radius > 0
         kernel = (2*smooth_radius+1, 2*smooth_radius+1)
         varmap = mapwindow(median, varmap, kernel)
     end
-
     return varmap
 end
 
+"""
+    exterior_mask(varmap, threshold; connectivity=8)
+
+Return a `BitMatrix` of the same shape as `varmap` that is `true` everywhere
+except the high-variance region connected to the grid boundary. Cells with 
+`varmap > threshold` that are enclosed by low-variance cells are kept. 
+
+`NaN` counts as high, matching the fail-safe in [`filterbounds!`](@ref).
+
+`connectivity` is `8` (diagonals connect) or `4`. Use `8` — a diagonal link 
+to the exterior then counts as connected, which is the conservative choice. 
+
+See also: [`filterbounds!`](@ref), [`krigingmask`](@ref)
+"""
+function exterior_mask(varmap, threshold; connectivity=8)
+    ny, nx = size(varmap)
+    high = .!(varmap .≤ threshold)
+    outside = falses(ny, nx)
+    stack = Tuple{Int,Int}[]
+
+    for i in 1:ny, j in (1, nx)
+        if high[i, j] && !outside[i, j]
+            outside[i, j] = true
+            push!(stack, (i, j))
+        end
+    end
+    for j in 1:nx, i in (1, ny)
+        if high[i, j] && !outside[i, j]
+            outside[i, j] = true
+            push!(stack, (i, j))
+        end
+    end
+
+    offsets = connectivity == 4 ? ((1,0), (-1,0), (0,1), (0,-1)) :
+        ((1,0), (-1,0), (0,1), (0,-1), (1,1), (1,-1), (-1,1), (-1,-1))
+
+    while !isempty(stack)
+        i, j = pop!(stack)
+        for (di, dj) in offsets
+            a, b = i + di, j + dj
+            if 1 ≤ a ≤ ny && 1 ≤ b ≤ nx && high[a, b] && !outside[a, b]
+                outside[a, b] = true
+                push!(stack, (a, b))
+            end
+        end
+    end
+
+    return .!outside
+end
 
 """
     filterbounds!(localization, lonlat, west, east, south, north)
@@ -688,32 +735,34 @@ function filterbounds!(localization, lonlat, west, east, south, north)
     end
     return localization
 end
-
 """
     filterbounds!(localization, varmap, threshold)
 
 Multiple-dispatch alternative to
-[`filterbounds!(localization, lonlat, west, east, south, north)`](@ref) that filters
-based on a kriging variance map (e.g. from [`krigingmask`](@ref)) instead of a
-rectangular lon/lat box.
+[`filterbounds!(localization, lonlat, west, east, south, north)`](@ref) that filters based
+on a kriging variance map (e.g. from [`krigingmask`](@ref)) instead of a rectangular
+lon/lat box.
 
-For each grid cell, if `varmap[i] > threshold`, row `i` of `localization` is zeroed out.
-This produces a filter that conforms to the actual path geometry rather than to a coarse
-cardinal-aligned box.
+Row `i` of `localization` is zeroed where [`exterior_mask`](@ref) is `false`, i.e. where
+`varmap[i] > threshold` *and* that cell connects to the grid boundary. High-variance
+pockets enclosed by the network are retained, since those cells are interpolated between
+surrounding paths rather than extrapolated beyond them. `NaN` is treated as exceeding the
+threshold.
 
 The linear indexing of `varmap` must match the row ordering of `localization`, i.e. both
 must be derived from the same `densify(x_grid, y_grid)`. `krigingmask(paths, projection,
-x_grid, y_grid; …)` is constructed to satisfy this.
+x_grid, y_grid; …)` is constructed to satisfy this, and `varmap` must retain its
+`(length(y_grid), length(x_grid))` shape so the connectivity search is well defined.
 
-A typical threshold for a unit-sill Gaussian variogram is `0.2^2 = 0.04`, matching the
-plotting-side mask in `gridInterpolate.jl`.
+A typical threshold for a unit-sill Gaussian variogram is `0.2^2 = 0.04`.
+
+See also: [`exterior_mask`](@ref), [`krigingmask`](@ref)
 """
-function filterbounds!(localization, varmap::AbstractArray, threshold::Real)
+function filterbounds!(localization, varmap::AbstractMatrix, threshold::Real)
     @assert length(varmap) == size(localization, 1) "length(varmap) ($(length(varmap))) must equal size(localization, 1) ($(size(localization, 1)))"
-    for i in eachindex(varmap)
-        if isnan(varmap[i]) || varmap[i] > threshold
-            localization[i, :] .= 0
-        end
+    keep = exterior_mask(varmap, threshold)
+    for i in eachindex(keep)
+        keep[i] || (localization[i, :] .= 0)
     end
     return localization
 end
