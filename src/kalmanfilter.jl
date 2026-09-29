@@ -1,3 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Observation-ensemble statistics, generic over the observable field set
+#
+# yb / ybar / Y all carry a leading :field axis whose keys equal `datatypes`
+# (see the layout definition in utils.jl). Phase-like fields (PHASE_FIELDS) use
+# circular means and wrapped residuals; all other fields — including the
+# Cartesian differential observables :s2 and :s3 — are ordinary linear rows.
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    obs_ensemble_mean!(ybar, yb, datatypes) → ybar
+
+Overwrite the entries of `ybar` (arithmetic ensemble mean of `yb`) belonging to
+circular fields with the anchored circular mean from `circular_phase_stats`,
+per path. Linear fields are left at their arithmetic mean.
+"""
+function obs_ensemble_mean!(ybar, yb, datatypes)
+    for f in datatypes
+        is_phase_field(f) || continue
+        for p in yb.path
+            ref_m, _ = circular_phase_stats(parent(parent(yb(field=f, path=p))))
+            ybar(field=f, path=p) .= ref_m
+        end
+    end
+    return ybar
+end
+
+"""
+    obs_perturbations(yb, ybar, datatypes) → Y
+
+Centered measurement perturbations with the same `(field × path × ens)` shape as
+`yb`. Circular fields are centered with `phasediff`; linear fields by
+subtraction.
+"""
+function obs_perturbations(yb, ybar, datatypes)
+    Y = similar(yb)
+    for f in datatypes
+        if is_phase_field(f)
+            Y(field=f) .= phasediff.(yb(field=f), ybar(field=f))
+        else
+            Y(field=f) .= yb(field=f) .- ybar(field=f)
+        end
+    end
+    return Y
+end
+
+"""
+    _innovation(f, y_loc, ybar_loc) → Array
+
+Per-field innovation block `y − ybar` for field `f`, wrapped for circular fields.
+"""
+function _innovation(f, y_loc, ybar_loc)
+    if is_phase_field(f)
+        return phasediff.(Array(y_loc(field=f)), Array(ybar_loc(field=f)))
+    else
+        return Array(y_loc(field=f)) .- Array(ybar_loc(field=f))
+    end
+end
+
 """
 LETKF_measupdate(H, xb, y, R; ρ=1.1, localization=nothing, datatypes=(:amp, :phase)) → (xa, yb)
 
@@ -9,15 +68,18 @@ the steps in [^1].
 This function is specific to the VLF estimation problem and makes use of `KeyedArray`s from
 AxisKeys.jl.
 
-- `H → KeyedArray(yb; field=[:amp, :phase], path=pathnames, ens=ens)`:
+- `H → KeyedArray(yb; field=collect(datatypes), path=pathnames, ens=ens)`:
     Observation model that maps from state space to observation space (``y = H(x) + ϵ``).
 - `xb::KeyedArray(xb; field=[:h, :b], y=y, x=x,  ens=ens)`:
     Ensemble matrix of states having size `(nstates, nensemble)`.
     It is assumed the first half of rows are ``h′`` and the second half are ``β``.
-- `y::KeyedArray(data; field=[:amp, :phase], path=pathnames)`:
-    Stacked vector of observations `[amps...; phases...]`.
-- `R`: Vector of the diagonal data covariance matrix ``σ²``.
-- `y_grid`: 
+- `y::KeyedArray(data; field=..., path=pathnames)`:
+    Observations, one row-block per entry of `datatypes` (extra fields such as
+    `_noiseless` copies may be present; only `datatypes` entries are consumed).
+- `R`: Vector of the diagonal data covariance ``σ²`` in the stacked layout
+    `[field₁(paths); field₂(paths); ...]` in `datatypes` order (see `fieldrange`).
+- `datatypes`: Tuple of observable field Symbols in canonical order, drawn from
+    (:amp, :phase, :s2, :s3).
 
 # References
 
@@ -28,32 +90,14 @@ Phenomena, vol. 230, no. 1, pp. 112–126, Jun. 2007.
 function LETKF_measupdate(H, xb, y, R;
     ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
 
-    # Make sure xb, yb, and y are correct KeyedArrays
-    # xb = KeyedArray(xb; field=[:h, :b], y=xb.y, x=xb.x, ens=xb.ens)
-    # y = KeyedArray(y; field=[:amp, :phase], path=y.path)
-    
-    # 1.
+    # 1. Ensemble measurements
     yb = H(xb)
-    # yb = KeyedArray(yb; field=[:amp, :phase], path=y.path, ens=xb.ens)
-    
+
     ybar = mean(yb, dims=:ens)
+    obs_ensemble_mean!(ybar, yb, datatypes)
 
-    if :phase in datatypes
-        for p in yb.path
-            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
-            ybar(field=:phase, path=p) .= ref_m
-        end
-    end
-
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
-        Y(:amp) .= yb(:amp) .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
-    end
+    # 2. Centered measurement perturbations
+    Y = obs_perturbations(yb, ybar, datatypes)
 
     xa = xy_state_update(xb, y, ybar, Y, R;
         ρ=ρ, localization=localization, datatypes=datatypes)
@@ -112,25 +156,10 @@ function LETKF_stacked_update(H, xb::NamedTuple, y, R;
     # 1. Ensemble measurements (prior offsets, if any, are baked into yb by ensemble_model!)
     yb = H(xb)
     ybar = mean(yb, dims=:ens)
-    if :phase in datatypes
-        for p in yb.path
-            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
-            ybar(field=:phase, path=p) .= ref_m
-        end
-    end
+    obs_ensemble_mean!(ybar, yb, datatypes)
 
     # 2. Centered measurement perturbations
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
-        Y(:amp) .= yb(:amp) .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
-    else
-        error("Unknown datatypes: $datatypes")
-    end
+    Y = obs_perturbations(yb, ybar, datatypes)
 
     # 3. Update each field if it exists
     updated_fields = NamedTuple()
@@ -144,10 +173,12 @@ function LETKF_stacked_update(H, xb::NamedTuple, y, R;
     if haskey(xb, :tx_pwrs)
         if log10pwr_update
             log10_tx_pwrs   = log10.(xb.tx_pwrs)
-            log10_tx_pwrs_a = tx_pwrs_update(log10_tx_pwrs, y, ybar, Y, R; ρ=ρ)
+            log10_tx_pwrs_a = tx_pwrs_update(log10_tx_pwrs, y, ybar, Y, R;
+                ρ=ρ, datatypes=datatypes)
             tx_pwrs = 10 .^ log10_tx_pwrs_a
         else
-            tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
+            tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R;
+                ρ=ρ, datatypes=datatypes)
         end
         updated_fields = merge(updated_fields, (; tx_pwrs))
     end
@@ -157,7 +188,8 @@ function LETKF_stacked_update(H, xb::NamedTuple, y, R;
     if do_rx
         rx_phi_offset, rx_phi_logpost = categorical_rx_measupdate!(
             xb.rx_phi_logpost, yb, xb.rx_phi_offset, y, R, rng;
-            η=η, commit_threshold=commit_threshold, correct_yb=false)
+            η=η, commit_threshold=commit_threshold, correct_yb=false,
+            datatypes=datatypes)
         updated_fields = merge(updated_fields, (; rx_phi_offset, rx_phi_logpost))
     end
 
@@ -177,28 +209,11 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
 
     # 1. Ensemble measurements
     yb = H(xb)
-    ybar = mean(yb, dims=:ens)   # correct for :amp; :phase overwritten below
+    ybar = mean(yb, dims=:ens)   # arithmetic; circular fields overwritten below
+    obs_ensemble_mean!(ybar, yb, datatypes)
 
     # 2. Centered measurement perturbations
-    if :phase in datatypes
-        for p in yb.path
-            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
-            ybar(field=:phase, path=p) .= ref_m
-        end
-    end
-
-    # Centered measurement perturbations (original shapes preserved)
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
-        Y(:amp)   .= yb(:amp)   .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
-    else
-        error("Unknown datatypes: $datatypes")
-    end
+    Y = obs_perturbations(yb, ybar, datatypes)
 
     # 3. Update each field if it exists, starting with the bias parameters
     updated_fields = NamedTuple()
@@ -206,15 +221,20 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
     if haskey(xb, :tx_pwrs)
         if log10pwr_update
             log10_tx_pwrs = log10.(xb.tx_pwrs)
-            log10_tx_pwrs_a = tx_pwrs_update(log10_tx_pwrs, y, ybar, Y, R; ρ=ρ)
+            log10_tx_pwrs_a = tx_pwrs_update(log10_tx_pwrs, y, ybar, Y, R;
+                ρ=ρ, datatypes=datatypes)
             tx_pwrs = 10 .^ log10_tx_pwrs_a
         else
-            tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R; ρ=ρ)
+            tx_pwrs = tx_pwrs_update(xb.tx_pwrs, y, ybar, Y, R;
+                ρ=ρ, datatypes=datatypes)
         end
         updated_fields = merge(updated_fields, (; tx_pwrs))
 
         pathnames=y.path
-        ## G(b): apply TX power offsets
+        ## G(b): apply TX power offsets. A TX power change scales the source
+        ## moment, shifting the absolute Hy amplitude only; the differential
+        ## observables (:s2, :s3) derive from the Hx/Hy ratio and are exactly
+        ## invariant to it, so no correction applies to them.
         for e in tx_pwrs.ens
             for tx in tx_pwrs.pwrs
                 txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
@@ -229,32 +249,16 @@ function LETKF_dual_update(H, xb::NamedTuple, y, R;
     if do_rx
         rx_phi_offset, rx_phi_logpost = categorical_rx_measupdate!(
             xb.rx_phi_logpost, yb, xb.rx_phi_offset, y, R, rng;
-            η=η, commit_threshold=commit_threshold, correct_yb=true)
+            η=η, commit_threshold=commit_threshold, correct_yb=true,
+            datatypes=datatypes)
         updated_fields = merge(updated_fields, (; rx_phi_offset, rx_phi_logpost))
     end
 
-   # Recompute Y after applying bias updates to yb
-    ybar = mean(yb, dims=:ens)   # correct for :amp; :phase overwritten below
+    # Recompute Y after applying bias updates to yb
+    ybar = mean(yb, dims=:ens)
+    obs_ensemble_mean!(ybar, yb, datatypes)
 
-   if :phase in datatypes
-        for p in yb.path
-            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
-            ybar(field=:phase, path=p) .= ref_m
-        end
-    end
-
-    # Centered measurement perturbations (original shapes preserved)
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
-        Y(:amp)   .= yb(:amp)   .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
-    else
-        error("Unknown datatypes: $datatypes")
-    end
+    Y = obs_perturbations(yb, ybar, datatypes)
     
     if haskey(xb, :xy_state)
         xy_state = xy_state_update(xb.xy_state, y, ybar, Y, R;
@@ -295,7 +299,8 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
     # 2a. TX bias: split-ensemble update; bias_only_update! folds the amplitude
     #     correction into yb in place.
     new_tx_pwrs = bias_only_update!(yb, xb.tx_pwrs, y, R;
-                                    ρ=ρ, log10pwr_update=log10pwr_update)
+                                    ρ=ρ, log10pwr_update=log10pwr_update,
+                                    datatypes=datatypes)
     updated_fields = merge(updated_fields, (; tx_pwrs=new_tx_pwrs))
 
     # 2b. RX bias: categorical update on the dual path; correct_yb=true folds the
@@ -303,7 +308,8 @@ function LETKF_split_update(H, xb::NamedTuple, y, R;
     if do_rx
         rx_phi_offset, rx_phi_logpost = categorical_rx_measupdate!(
             xb.rx_phi_logpost, yb, xb.rx_phi_offset, y, R, rng;
-            η=η, commit_threshold=commit_threshold, correct_yb=true)
+            η=η, commit_threshold=commit_threshold, correct_yb=true,
+            datatypes=datatypes)
         updated_fields = merge(updated_fields, (; rx_phi_offset, rx_phi_logpost))
     end
 
@@ -323,7 +329,7 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
  
 """
-    bias_only_update!(yb, tx_pwrs, y, R; ρ, log10pwr_update) → new_tx_pwrs
+    bias_only_update!(yb, tx_pwrs, y, R; ρ, log10pwr_update, datatypes) → new_tx_pwrs
 
 Perform only the split-ensemble TX-power LETKF update, then immediately fold the
 resulting amplitude correction back into `yb` so accumulated bias estimates are
@@ -337,18 +343,22 @@ dimension, so it is independent of the split TX machinery.
 - `yb`: ensemble prediction array `(field, path, ens)` — **mutated in-place**.
 - `tx_pwrs`: current TX-power prior with dims `(pwrs, ens, split_ens)`.
 - `y`: observed data for this window step.
-- `R`: diagonal observation-noise variance vector.
+- `R`: diagonal observation-noise variance vector in the stacked `datatypes` layout.
+- `datatypes`: observable field layout of `yb`, `y`, and `R`.
 
 Returns `new_tx_pwrs`, the refined TX-power estimate to be used as the prior for
 the next window iteration.
 
 # Design notes
-- The `yb` correction is the log-power change (in dB) relative to the prior mean.
+- The `yb` correction is the log-power change (in dB) relative to the prior mean,
+  applied to the `:amp` rows only — the differential observables are invariant to
+  TX power by construction.
 - Calling this N times with successive observations accumulates corrections that
   telescope to `log10(mean(tx_N)/mean(tx_0))*10` — identical to a single step
   applied with the final estimate.
 """
-function bias_only_update!(yb, tx_pwrs, y, R; ρ=1.1, log10pwr_update=false)
+function bias_only_update!(yb, tx_pwrs, y, R; ρ=1.1, log10pwr_update=false,
+    datatypes::Tuple=(:amp, :phase))
 
     pathnames = y.path
     npaths = length(pathnames)
@@ -361,7 +371,8 @@ function bias_only_update!(yb, tx_pwrs, y, R; ρ=1.1, log10pwr_update=false)
     new_tx_pwrs = similar(tx_pwrs)
     @showprogress Threads.@threads for e in yb.ens
         split_tx_update!(yb(ens=e), tx_pwrs(ens=e), new_tx_pwrs(ens=e),
-                         y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
+                         y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update,
+                         datatypes)
     end
 
     # Accumulate amplitude correction: Δ = change in mean log-power per TX
@@ -387,38 +398,24 @@ function xy_only_update(yb, xy_state, y, R;
     ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
  
     ybar = mean(yb, dims=:ens)
- 
-    if :phase in datatypes
-        for p in yb.path
-            ref_m, _ = circular_phase_stats(parent(parent(yb(field=:phase, path=p))))
-            ybar(field=:phase, path=p) .= ref_m
-        end
-    end
+    obs_ensemble_mean!(ybar, yb, datatypes)
 
-    if :amp in datatypes && :phase in datatypes
-        Y = similar(yb)
-        Y(:amp) .= yb(:amp) .- ybar(:amp)
-        Y(:phase) .= phasediff.(yb(:phase), ybar(:phase))
-    elseif :amp in datatypes
-        Y = yb(:amp) .- ybar(:amp)
-    elseif :phase in datatypes
-        Y = phasediff.(yb(:phase), ybar(:phase))
-    else
-        error("xy_only_update: unknown datatypes $datatypes")
-    end
+    Y = obs_perturbations(yb, ybar, datatypes)
  
     return xy_state_update(xy_state, y, ybar, Y, R;
         ρ=ρ, localization=localization, datatypes=datatypes)
 end
  
 
-function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_size, pathnames, log10pwr_update)
+function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_size,
+    pathnames, log10pwr_update, datatypes)
     
     @assert Set(dimnames(tx_pwrs_b)) == Set((:pwrs, :split_ens))
     #Necessary for mean in the for loop to calculate what we expect
+    fields = collect(axiskeys(yb, :field))
     split_yb = KeyedArray(
-        Array{Float64,3}(undef, 2, npaths, split_ens_size),
-        field = [:amp, :phase],
+        Array{Float64,3}(undef, length(fields), npaths, split_ens_size),
+        field = fields,
         path  = pathnames,
         ens   = 1:split_ens_size,
     )
@@ -440,33 +437,31 @@ function split_tx_update!(yb, tx_pwrs_b, tx_pwrs_a, y, R, ρ, npaths, split_ens_
             txpaths = pathnames[startswith.(pathnames, String(tx) * "-")]
             Δpwr_log = log10(tx_pwrs_b(pwrs=tx, split_ens=ee) / μ)
             #Assumes that for the H(xb), the mean of xb.tx_pwrs was used. This should be specified in the definition of f() passed to H().
+            #TX power scales the source moment: it shifts :amp only; (:s2, :s3) are ratio observables and are invariant.
             split_yb(field=:amp, ens=ee, path=txpaths) .+= Δpwr_log * 10  #10 dB per decade
 
         end
     end
 
     split_ybar = mean(split_yb, dims=:ens)
-    for p in split_ybar.path
-        ref_m, _ = circular_phase_stats(parent(parent(split_yb(field=:phase, path=p))))
-        split_ybar(field=:phase, path=p) .= ref_m
-    end
+    obs_ensemble_mean!(split_ybar, split_yb, datatypes)
 
-    split_Y = similar(split_yb)
-    split_Y(:amp)   .= split_yb(field=:amp) .- split_ybar(:amp)
-    split_Y(:phase) .= phasediff.(split_yb(field=:phase), split_ybar(:phase))
+    split_Y = obs_perturbations(split_yb, split_ybar, datatypes)
 
     for tx in tx_pwrs_b.pwrs
         split_tx_pwrs(pwrs=tx) .= strip(tx_pwrs_b(pwrs=tx)) 
     end
 
     if log10pwr_update
-        xnew_amp = tx_pwrs_update(log10.(split_tx_pwrs), y, split_ybar, split_Y, R; ρ = ρ)
+        xnew_amp = tx_pwrs_update(log10.(split_tx_pwrs), y, split_ybar, split_Y, R;
+            ρ=ρ, datatypes=datatypes)
 
         for tx in tx_pwrs_b.pwrs
             tx_pwrs_a(pwrs=tx) .= 10 .^(strip(xnew_amp(pwrs=tx)))
         end
     else
-        xnew_amp = tx_pwrs_update(split_tx_pwrs, y, split_ybar, split_Y, R; ρ = ρ)
+        xnew_amp = tx_pwrs_update(split_tx_pwrs, y, split_ybar, split_Y, R;
+            ρ=ρ, datatypes=datatypes)
 
         for tx in tx_pwrs_b.pwrs
             tx_pwrs_a(pwrs=tx) .= (strip(xnew_amp(pwrs=tx)))
@@ -478,6 +473,11 @@ end
     xy_state_update(xy_state, y, ybar, Y, R; ρ=1.1, localization=nothing, datatypes=(:amp, :phase)) → xy_state_a
     Perform LETKF analysis update on only the `xy_state` state variable, given the measurements `y`, mean of the modeled measurements `ybar`, 
     ensemble differences from that mean `Y`, and the observation noise covariance `R`.
+
+`Y` carries a leading `:field` axis with keys equal to `datatypes`; `R` is the
+stacked variance vector in the same field-major layout (see `fieldrange`). Per
+grid cell, the localized `Y`, `Δ`, and `R` are stacked field-by-field in
+`datatypes` order.
 """
 function xy_state_update(xy_state, y, ybar, Y, R;
     ρ=1.1, localization=nothing, datatypes::Tuple=(:amp, :phase))
@@ -486,6 +486,10 @@ function xy_state_update(xy_state, y, ybar, Y, R;
     ncells = prod(gridshape)
     npaths = length(y.path)
     ens_size = length(xy_state.ens)
+    nfields = length(datatypes)
+
+    length(R) == nfields*npaths || throw(ArgumentError(
+        "xy_state_update: length(R) = $(length(R)) does not match length(datatypes)·npaths = $(nfields*npaths)"))
 
     if !isnothing(localization)
         size(localization) == (ncells, npaths) ||
@@ -514,45 +518,37 @@ function xy_state_update(xy_state, y, ybar, Y, R;
             end
         end
 
-        # Localize and flatten measurements
+        # Localize measurements
         ybar_loc = ybar(path=Index(loc_mask))
         Y_loc = Y(path=Index(loc_mask))
         y_loc = y(path=Index(loc_mask))
+        loc_paths = collect(Y_loc.path)
 
-        if :amp in datatypes && :phase in datatypes
-            Y_loc = KeyedArray([Array(Y_loc(:amp)); Array(Y_loc(:phase))];
-                   path = vcat(collect(Y_loc.path), collect(Y_loc.path)),
-                   ens  = collect(Y_loc.ens))
-            R_loc = @views Diagonal([R[1:npaths][loc_mask]; R[npaths+1:end][loc_mask]])
-        else
-            # Only amp or phase
-            R_loc = @views Diagonal(R[loc_mask])
-        end
+        # Stack fields in datatypes order: [field₁(loc paths); field₂(loc paths); ...]
+        Y_stack = KeyedArray(
+            reduce(vcat, (Array(Y_loc(field=f)) for f in datatypes));
+            path = repeat(loc_paths, nfields),
+            ens  = collect(Y_loc.ens))
+        R_loc = Diagonal(
+            reduce(vcat, (R[fieldrange(f, datatypes, npaths)][loc_mask] for f in datatypes)))
 
         # 4.
-        C = strip(Y_loc)'/R_loc
+        C = strip(Y_stack)'/R_loc
 
         # 5.
         # Can apply ρ here if H is linear, or if ρ is close to 1
-        Patilde = inv((ens_size - 1)*I/ρ + C*Y_loc)
+        Patilde = inv((ens_size - 1)*I/ρ + C*Y_stack)
 
         # 6.
         # Symmetric square root
         Wa = sqrt((ens_size - 1)*Hermitian(strip(Patilde)))
 
         # 7.
-        if :amp in datatypes && :phase in datatypes
-            Δ = KeyedArray(
-                vcat(Array(y_loc(:amp)) .- Array(ybar_loc(:amp)),
-                    phasediff.(Array(y_loc(:phase)), Array(ybar_loc(:phase))));
-                path = vcat(collect(y_loc.path), collect(y_loc.path)),
-                ens  = ybar_loc.ens,   # <-- keep OneTo instead of collecting
-            )
-        elseif :amp in datatypes
-            Δ = y_loc(:amp) .- ybar_loc(:amp)
-        elseif :phase in datatypes
-            Δ = phasediff.(y_loc(:phase), ybar_loc(:phase))
-        end
+        Δ = KeyedArray(
+            reduce(vcat, (_innovation(f, y_loc, ybar_loc) for f in datatypes));
+            path = repeat(loc_paths, nfields),
+            ens  = ybar_loc.ens,   # <-- keep OneTo instead of collecting
+        )
 
         wabar = Patilde*C*Δ
         wa = Wa .+ wabar
@@ -567,11 +563,18 @@ function xy_state_update(xy_state, y, ybar, Y, R;
 end
 
 """
-    tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1) → tx_pwrs_a
+    tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1, datatypes=(:amp, :phase)) → tx_pwrs_a
     Perform LETKF analysis update on only the `tx_pwrs` bias offset state variable, given the measurements `y`,
     mean of the modeled measurements `ybar`, ensemble differences from that mean `Y`, and the observation noise covariance `R`.
+
+Uses `:amp` observations only, from paths originating at each transmitter. `R`
+follows the stacked `datatypes` layout; the `:amp` block is located via
+`fieldrange`.
 """
-function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1)
+function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1, datatypes::Tuple=(:amp, :phase))
+
+    :amp in datatypes || error(
+        "tx_pwrs_update: TX power estimation requires :amp observations; datatypes = $datatypes")
     
     if !(:field in dimnames(Y))
         #Stacked/Dual update removes the field dimension, causing breakage here.
@@ -587,6 +590,11 @@ function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1)
     npaths = length(y.path)
     ens_size = length(tx_pwrs.ens)
     num_txs = length(tx_pwrs.pwrs)
+
+    length(R) == length(datatypes)*npaths || throw(ArgumentError(
+        "tx_pwrs_update: length(R) = $(length(R)) does not match length(datatypes)·npaths = $(length(datatypes)*npaths)"))
+
+    amp_range = fieldrange(:amp, datatypes, npaths)
 
     # 2.
     tx_pwrsbar = mean(tx_pwrs,dims=:ens)
@@ -606,7 +614,7 @@ function tx_pwrs_update(tx_pwrs, y, ybar, Y, R; ρ=1.1)
         Y_loc = Y(path=Index(loc_mask), field=:amp)
         y_loc = y(path=Index(loc_mask), field=:amp)
 
-        R_loc = @views Diagonal(R[1:npaths][loc_mask])
+        R_loc = @views Diagonal(R[amp_range][loc_mask])
  
         # 4.
         C = strip(Y_loc)'/R_loc
@@ -641,10 +649,17 @@ end
 # Alternative to `rx_phi_update` for the discrete MSK-ambiguity case where
 # Bϕ ∈ {0,1,2,3} is constant in time. Maintains a per-path log-posterior and
 # accumulates evidence across iterations. See `runletkf` `:categorical` branch.
+#
+# The Bϕ offset is a property of the (single, synchronized) demodulation trellis:
+# it shifts the absolute Hy phase (`:phase`) only. The differential observables
+# (:s2, :s3) derive from the inter-channel ratio, in which any trellis offset
+# common to the two loop channels cancels, so no categorical machinery touches
+# them.
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4)
+    categorical_rx_update!(log_post, yb, current_offsets, y, R;
+                           period=4, η=1.0, datatypes=(:amp, :phase))
         → log_post (mutated)
 
 Accumulate Bayesian evidence into the per-path log-posterior `log_post`
@@ -672,11 +687,13 @@ Normalization is applied lazily — `log_post` accumulates as raw log-likelihood
 and consumers (`rx_phi_posterior`, `rx_phi_sample`) normalize on read.
 
 # `R` handling
-Same convention as `rx_phi_update`: `R` may be length `npaths` (phase only) or
-`2*npaths` (amp first, then phase). Phase variances are the second half in the
-combined case. Each path uses its own σ².
+`R` follows the stacked field-major `datatypes` layout; the per-path phase
+variances are located via `fieldrange(:phase, datatypes, npaths)`. Each path
+uses its own σ².
 """
-function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4, η=1.0)
+function categorical_rx_update!(log_post, yb, current_offsets, y, R;
+    period=4, η=1.0, datatypes::Tuple=(:amp, :phase))
+
     npaths = length(yb.path)
     quarter = π / (period / 2)  # = π/2 for period=4
 
@@ -684,14 +701,12 @@ function categorical_rx_update!(log_post, yb, current_offsets, y, R; period=4, �
     @assert axiskeys(yb, :path) == axiskeys(current_offsets, :path) == axiskeys(log_post, :path) ==
             axiskeys(y, :path) "categorical_rx_update!: :path axis mismatch across yb / current_offsets / log_post / y"
 
-    # Locate phase variances in R
-    if length(R) == npaths
-        R_phase = R
-    elseif length(R) == 2*npaths
-        R_phase = R[npaths+1:end]
-    else
-        error("categorical_rx_update!: length(R) = $(length(R)) does not match $npaths or 2·$npaths")
-    end
+    :phase in datatypes || error(
+        "categorical_rx_update!: categorical RX estimation requires :phase observations; datatypes = $datatypes")
+    length(R) == length(datatypes)*npaths || error(
+        "categorical_rx_update!: length(R) = $(length(R)) does not match length(datatypes)·npaths = $(length(datatypes)*npaths)")
+
+    R_phase = view(R, fieldrange(:phase, datatypes, npaths))
 
     for (n, p) in enumerate(yb.path)
         σ² = R_phase[n]
@@ -731,6 +746,9 @@ this call, `yb` honors the post-evidence posterior — particularly important on
 iterations where the new observation tipped one or more paths above
 `commit_threshold`, collapsing their per-member spread to MAP and removing the
 corresponding contribution to `Y_phase`.
+
+Only the `:phase` rows of `yb` are shifted: the trellis offset is common-mode
+across the two loop channels and cancels in the ratio observables (:s2, :s3).
 
 # Arguments
 - `yb`: ensemble prediction `(field, path, ens)` — `:phase` channel mutated.
@@ -794,7 +812,8 @@ end
 """
     categorical_rx_measupdate!(rx_log_post, yb, rx_phi_offset, y, R, rng;
                                η=1.0, commit_threshold=1.0,
-                               correct_yb=true, period=4)
+                               correct_yb=true, period=4,
+                               datatypes=(:amp, :phase))
         → (rx_phi_offset, rx_log_post)
 
 Single-call categorical RX measurement update for use inside the
@@ -818,8 +837,10 @@ posterior. Returns `(rx_phi_offset, rx_log_post)` for merging into `updated_fiel
 """
 function categorical_rx_measupdate!(rx_log_post, yb, rx_phi_offset, y, R, rng;
                                     η=1.0, commit_threshold=1.0,
-                                    correct_yb::Bool=true, period=4)
-    categorical_rx_update!(rx_log_post, yb, rx_phi_offset, y, R; period=period, η=η)
+                                    correct_yb::Bool=true, period=4,
+                                    datatypes::Tuple=(:amp, :phase))
+    categorical_rx_update!(rx_log_post, yb, rx_phi_offset, y, R;
+        period=period, η=η, datatypes=datatypes)
 
     if correct_yb
         posterior_resample_correct!(yb, rx_phi_offset, rx_log_post, rng;
@@ -831,30 +852,68 @@ end
 
 
 """
+    _assign_member!(ym, res, e)
+
+Write a single ensemble member's forward-model result into `ym(ens=e)`.
+
+Two result forms are supported:
+- `res::KeyedArray` with a `(field × path)` layout (from [`model_observables`](@ref)):
+  each field of `ym` is assigned by key, so a field-axis mismatch fails loudly.
+- `res::Tuple` of `(amps, phases)` (from the single-component [`model`](@ref)):
+  requires `ym` to carry exactly the `:amp` and `:phase` fields.
+"""
+function _assign_member!(ym, res::KeyedArray, e)
+    for fld in axiskeys(ym, :field)
+        ym(field=fld, ens=e) .= res(field=fld)
+    end
+    return ym
+end
+
+function _assign_member!(ym, res::Tuple, e)
+    a, p = res
+    ym(field=:amp, ens=e) .= a
+    ym(field=:phase, ens=e) .= p
+    return ym
+end
+
+"""
+    _wrap_phase_fields!(ym)
+
+Wrap the ensemble of each circular field of `ym` within ±π about a Gaussian fit
+to that path's ensemble (see [`modgaussian`](@ref)). Linear fields, including
+(:s2, :s3), are untouched.
+"""
+function _wrap_phase_fields!(ym)
+    for fld in axiskeys(ym, :field)
+        is_phase_field(fld) || continue
+        for pth in ym.path
+            ym(field=fld, path=pth) .= modgaussian(ym(field=fld, path=pth))
+        end
+    end
+    return ym
+end
+
+"""
     ensemble_model!(ym, f, x)
 
 Run the forward model `f` with `KeyedArray` argument `x` for each member of `x.ens`.
+
+`f` may return either a `(field × path)` KeyedArray (multi-observable forward
+model) or an `(amps, phases)` Tuple (single-component forward model); see
+[`_assign_member!`](@ref).
 """
 function ensemble_model!(ym, f, x)
-    # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
-    #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
     @showprogress Threads.@threads for e in x.ens
-        a, p = f(x(ens=e))
-        ym(:amp)(ens=e) .= a
-        ym(:phase)(ens=e) .= p
+        _assign_member!(ym, f(x(ens=e)), e)
     end
 
-    # Fit a Gaussian to phase data ensemble, then use wrap the phases from ±180° from the mean
-    for p in ym.path
-        ym(:phase)(path=p) .= modgaussian(ym(:phase)(path=p))
-    end
+    # Wrap circular-field ensembles within ±180° about the fit mean
+    _wrap_phase_fields!(ym)
 
     return ym
 end
 
 function ensemble_model!(ym, f, x::NamedTuple)
-    # ym = KeyedArray(Array{Float64,3}(undef, 2, length(pathnames), length(x.ens));
-    #         field=SVector(:amp, :phase), path=pathnames, ens=x.ens)
     @showprogress Threads.@threads for e in x.xy_state.ens
         xy_state = x.xy_state(ens=e)
 
@@ -867,11 +926,11 @@ function ensemble_model!(ym, f, x::NamedTuple)
         end
 
         # Evaluate model
-        a, p = f(ens_state)
-        ym(:amp)(ens=e) .= a
-        ym(:phase)(ens=e) .= p
+        _assign_member!(ym, f(ens_state), e)
 
-        # Apply receiver phase offsets if present
+        # Apply receiver phase offsets if present. The Bϕ trellis offset shifts
+        # the absolute Hy phase only; the ratio observables (:s2, :s3) are
+        # invariant to it and receive no offset.
         if haskey(x, :rx_phi_offset)
             if (:split_ens in dimnames(x.rx_phi_offset))
                 offsets = mode.(eachslice(x.rx_phi_offset(ens=e), dims=:path))
@@ -882,10 +941,8 @@ function ensemble_model!(ym, f, x::NamedTuple)
         end
     end
 
-    # Wrap phase ensemble around ±180°
-    for pth in ym.path
-        ym(:phase)(path=pth) .= modgaussian(ym(:phase)(path=pth))
-    end
+    # Wrap circular-field ensembles around ±180°
+    _wrap_phase_fields!(ym)
 
     return ym
 end
