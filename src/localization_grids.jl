@@ -722,6 +722,34 @@ function exterior_mask(varmap, threshold; connectivity=8)
 end
 
 """
+    krigingkeep(paths, projection, x_grid, y_grid; threshold, krig_dr=20e3,
+                connectivity=8, kwargs...)
+
+Return a `BitMatrix` of size `(length(y_grid), length(x_grid))` that is `false` at grid
+nodes in the high-variance region connected to the grid boundary, as defined by
+[`exterior_mask`](@ref).
+
+The kriging variance and its connectivity are evaluated on a refined grid spanning
+`(x_grid, y_grid)` with spacing at most `krig_dr`, whose nodes include every node of
+`(x_grid, y_grid)`. The result is sampled at those nodes. This resolves low-variance
+corridors narrower than the spacing of `(x_grid, y_grid)`, which otherwise break the
+enclosure of interior high-variance pockets. If the spacing is already `≤ krig_dr`, no
+refinement is applied.
+
+`kwargs` are passed to [`krigingmask`](@ref) (`pathstep`, `range`, `smooth_radius`).
+The result can be passed to [`filterbounds!(localization, keep)`](@ref).
+"""
+function krigingkeep(paths, projection, x_grid::AbstractRange, y_grid::AbstractRange, 
+                     threshold; krig_dr=20e3, connectivity=8, kwargs...)
+    rx = max(1, ceil(Int, abs(step(x_grid)) / krig_dr - 1e-9))
+    ry = max(1, ceil(Int, abs(step(y_grid)) / krig_dr - 1e-9))
+    fx = range(first(x_grid), last(x_grid); length=rx*(length(x_grid)-1)+1)
+    fy = range(first(y_grid), last(y_grid); length=ry*(length(y_grid)-1)+1)
+    varmap = krigingmask(paths, projection, fx, fy; kwargs...)
+    return exterior_mask(varmap, threshold; connectivity)[1:ry:end, 1:rx:end]
+end
+
+"""
     filterbounds!(localization, lonlat, west, east, south, north)
 
 Set `localization` entries to `0` if the corresponding `lonlat` entry is outside of the
@@ -766,6 +794,23 @@ function filterbounds!(localization, varmap::AbstractMatrix, threshold::Real)
     end
     return localization
 end
+
+"""
+    filterbounds!(localization, keep::AbstractMatrix{Bool})
+
+Zero row `i` of `localization` wherever `keep[i]` is `false`. The linear indexing of
+`keep` must match the row ordering of `localization`, i.e. `densify(x_grid, y_grid)`.
+"""
+function filterbounds!(localization, keep::AbstractMatrix{Bool})
+    @assert length(keep) == size(localization, 1) "length(keep) ($(length(keep))) must equal size(localization, 1) ($(size(localization, 1)))"
+    for i in eachindex(keep)
+        keep[i] || (localization[i, :] .= 0)
+    end
+    return localization
+end
+
+filterbounds!(localization, varmap::AbstractMatrix, threshold::Real) =
+    filterbounds!(localization, exterior_mask(varmap, threshold))
 
 
 """
