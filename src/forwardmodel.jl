@@ -23,6 +23,41 @@ function pathpts(tx, rx; dist=100e3)
     return line, wpts
 end
 
+# dB offset converting a Z₀H amplitude referenced to 1 µV/m into a B amplitude
+# referenced to 1 pT:  B [pT] = Z₀H [V/m] / c₀ × 1e12 = Z₀H [µV/m] × 1e6/c₀
+const ZH_DBUVM_TO_B_DBPT = 20log10(1e6 / LMP.C0)  # ≈ -49.5364 dB
+
+# Magnetic field components as returned in LMP's normalized Z₀H units
+const H_COMPONENTS = (Fields.Hz, Fields.Hy, Fields.Hx)
+
+
+"""
+    _pathcurves(o, component) → (amp, phase)
+
+Amplitude and phase curves at `o.output_ranges` for the requested field `component`.
+A `BasicOutput` carries the single component selected at input time; a `FieldsOutput`
+carries one curve per entry of `o.fieldcomponents`.
+"""
+function _pathcurves(o::LMP.BasicOutput, component; Hunits_pT=true)
+    # BasicOutput does not record its component; `component` must match what the
+    # corresponding Input's fieldcomponent was.
+    amp = (Hunits_pT && component in H_COMPONENTS) ?
+        o.amplitude .+ ZH_DBUVM_TO_B_DBPT : o.amplitude
+    return amp, o.phase
+end
+
+function _pathcurves(o::LMP.FieldsOutput, component; Hunits_pT=true)
+    k = findfirst(==(component), o.fieldcomponents)
+    isnothing(k) && throw(ArgumentError(
+        "$component not among computed components $(o.fieldcomponents)"))
+
+    amp, phase = o.amplitude[k], o.phase[k]
+    if Hunits_pT && component in H_COMPONENTS
+        amp = amp .+ ZH_DBUVM_TO_B_DBPT  # broadcast copy; never mutate the Output struct
+    end
+    return amp, phase
+end
+
 """
     _model_observation(tx, rx; pathstep=100e3) → (input, wpts)
 
@@ -31,7 +66,7 @@ transmitter `tx` and receiver `rx`.
 
 The rest of the `input` should be filled in using [`model_observation`](@ref).
 """
-function _model_observation(tx, rx; pathstep=100e3)
+function _model_observation(tx, rx; pathstep=100e3, fieldcomponent=Fields.H)
     _, wpts = pathpts(tx, rx; dist=pathstep)
 
     # Build the ExponentialInput
@@ -49,6 +84,7 @@ function _model_observation(tx, rx; pathstep=100e3)
     input.ground_epsrs = Vector{Int}(undef, length(wpts))
     input.frequency = tx.frequency.f
     input.power = tx.power
+    input.fieldcomponent = fieldcomponent
 
     # NOTE: if changing `output_ranges` step, must also update in `model`!
     input.output_ranges = collect(0:5e3:round(range(tx, rx)+10e3, digits=-4, RoundUp))
@@ -61,11 +97,11 @@ end
 
 Build the `ExponentialInput` for a single path from `tx` to `rx` at `datetime`.
 """
-function model_observation(itp::GeoStatsInterpolant, geox, tx, rx, datetime; pathstep=100e3)
+function model_observation(itp::GeoStatsInterpolant, geox, tx, rx, datetime; pathstep=100e3, fieldcomponent=Fields.H)
     :h in itp.method.varnames && :b in itp.method.varnames ||
         @warn "`:h` and `:b` should be defined in `itp.method`"
 
-    input, wpts = _model_observation(tx, rx; pathstep)
+    input, wpts = _model_observation(tx, rx; pathstep, fieldcomponent)
 
     # Projected wpts
     trans = lock(proj_lock) do 
@@ -102,8 +138,8 @@ end
 
 Build the `ExponentialInput` for a single path from `tx` to `rx` at `datetime`.
 """
-function model_observation(itp::ScatteredInterpolant, hitp, bitp, tx, rx, datetime; pathstep=100e3)
-    input, wpts = _model_observation(tx, rx; pathstep)
+function model_observation(itp::ScatteredInterpolant, hitp, bitp, tx, rx, datetime; pathstep=100e3, fieldcomponent=Fields.H)
+    input, wpts = _model_observation(tx, rx; pathstep, fieldcomponent)
 
     # Projected wpts
     trans = lock(proj_lock) do 
@@ -140,8 +176,8 @@ Build the `ExponentialInput` using `hbfcn`, a function of `(lon, lat, datetime)`
 
 This uses the [`igrf`](@ref) magnetic field and ground code from LMPTools.jl.
 """
-function model_observation(hbfcn, tx, rx, datetime; pathstep=100e3)
-    input, wpts = _model_observation(tx, rx; pathstep)
+function model_observation(hbfcn, tx, rx, datetime; pathstep=100e3, fieldcomponent=Fields.H)
+    input, wpts = _model_observation(tx, rx; pathstep, fieldcomponent)
 
     geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
 
@@ -178,7 +214,7 @@ and the second half is ``β``.
 Uses LongwaveModePropagator.jl as the forward model.
 """
 function model(itp::GeoStatsInterpolant, x, paths, datetime;
-    pathstep=100e3)
+    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true)
 
     npts = length(x) ÷ 2
     hprimes = x[1:npts]
@@ -194,9 +230,16 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
 
     for i in eachindex(paths)
         tx, rx = paths[i]
-        input = model_observation(itp, geox, tx, rx, datetime; pathstep)
+        input = model_observation(itp, geox, tx, rx, datetime; pathstep, fieldcomponent)
         batch.inputs[i] = input
     end
+
+    # Validate before running LMP: the extracted component must be among those computed
+    obscomponent in LMP.components(fieldcomponent) || throw(ArgumentError(
+        "obscomponent $obscomponent is not computed by fieldcomponent $fieldcomponent"))
+
+    # pT conversion applies only to magnetic components
+    convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
 
    
     output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
@@ -210,20 +253,22 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
         d = range(tx, rx)
         o = output.outputs[i]
 
+        amp, phase = _pathcurves(o, obscomponent; Hunits_pT=convert_pT)
+
         # NOTE: step size here should match `output_ranges` step in `model_observation`!
-        aitp = linear_interpolation(0:5e3:last(o.output_ranges), o.amplitude)
-        pitp = linear_interpolation(0:5e3:last(o.output_ranges), o.phase)
+        aitp = linear_interpolation(0:5e3:last(o.output_ranges), amp)
+        pitp = linear_interpolation(0:5e3:last(o.output_ranges), phase)
         amps[i] = aitp(d)
         phases[i] = pitp(d)
     end
 
     return amps, phases
 end
-model(itp::GeoStatsInterpolant, x::KeyedArray, paths, datetime; pathstep=100e3) =
-    model(itp, [filter(!isnan, x(:h)); filter(!isnan, x(:b))], paths, datetime; pathstep)
+model(itp::GeoStatsInterpolant, x::KeyedArray, paths, datetime; kwargs...) =
+    model(itp, [filter(!isnan, x(:h)); filter(!isnan, x(:b))], paths, datetime; kwargs...)
 
 function model(itp::ScatteredInterpolant, x, paths, datetime;
-    pathstep=100e3)
+    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true)
 
     npts = length(x) ÷ 2
     hprimes = x[1:npts]
@@ -240,10 +285,16 @@ function model(itp::ScatteredInterpolant, x, paths, datetime;
 
     for i in eachindex(paths)
         tx, rx = paths[i]
-        input = model_observation(itp, hitp, bitp, tx, rx, datetime; pathstep)
+        input = model_observation(itp, hitp, bitp, tx, rx, datetime; pathstep, fieldcomponent)
         batch.inputs[i] = input
     end
 
+    # Validate before running LMP: the extracted component must be among those computed
+    obscomponent in LMP.components(fieldcomponent) || throw(ArgumentError(
+        "obscomponent $obscomponent is not computed by fieldcomponent $fieldcomponent"))
+
+    # pT conversion applies only to magnetic components
+    convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
    
     output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
     
@@ -255,17 +306,19 @@ function model(itp::ScatteredInterpolant, x, paths, datetime;
         d = range(tx, rx)
         o = output.outputs[i]
 
+        amp, phase = _pathcurves(o, obscomponent; Hunits_pT=convert_pT)
+
         # NOTE: step size here should match `output_ranges` step in `model_observation`!
-        aitp = linear_interpolation(0:5e3:last(o.output_ranges), o.amplitude)
-        pitp = linear_interpolation(0:5e3:last(o.output_ranges), o.phase)
+        aitp = linear_interpolation(0:5e3:last(o.output_ranges), amp)
+        pitp = linear_interpolation(0:5e3:last(o.output_ranges), phase)
         amps[i] = aitp(d)
         phases[i] = pitp(d)
     end
 
     return amps, phases
 end
-model(itp::ScatteredInterpolant, x::KeyedArray, paths, datetime; pathstep=100e3) =
-    model(itp, [vec(x(:h)); vec(x(:b))], paths, datetime; pathstep)
+model(itp::ScatteredInterpolant, x::KeyedArray, paths, datetime; kwargs...) =
+    model(itp, [vec(x(:h)); vec(x(:b))], paths, datetime; kwargs...)
 
 """
     model(hbfcn::Function, paths, datetime; pathstep=100e3)
@@ -280,7 +333,7 @@ LongwaveModePropagator is used as the forward model.
 See also: [`model_observation`](@ref)
 """
 function model(hbfcn::Function, paths, datetime;
-    pathstep=100e3)
+    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true)
 
     batch = BatchInput{ExponentialInput}()
     batch.name = "estimate"
@@ -290,10 +343,16 @@ function model(hbfcn::Function, paths, datetime;
 
     for i in eachindex(paths)
         tx, rx = paths[i]
-        input = model_observation(hbfcn, tx, rx, datetime; pathstep)
+        input = model_observation(hbfcn, tx, rx, datetime; pathstep, fieldcomponent)
         batch.inputs[i] = input
     end
 
+    # Validate before running LMP: the extracted component must be among those computed
+    obscomponent in LMP.components(fieldcomponent) || throw(ArgumentError(
+        "obscomponent $obscomponent is not computed by fieldcomponent $fieldcomponent"))
+
+    # pT conversion applies only to magnetic components
+    convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
 
     output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
     
@@ -305,11 +364,12 @@ function model(hbfcn::Function, paths, datetime;
         d = range(tx, rx)
         o = output.outputs[i]
 
+        amp, phase = _pathcurves(o, obscomponent; Hunits_pT=convert_pT)
         # Using LMP we could skip the linear_interpolation and compute the field at exactly
         # the correct distance, but for consistency with LWPC we'll interpolate the output.
         # NOTE: step size here should match `output_ranges` step in `model_observation`!
-        aitp = linear_interpolation(0:5e3:last(o.output_ranges), o.amplitude)
-        pitp = linear_interpolation(0:5e3:last(o.output_ranges), o.phase)
+        aitp = linear_interpolation(0:5e3:last(o.output_ranges), amp)
+        pitp = linear_interpolation(0:5e3:last(o.output_ranges), phase)
         amps[i] = aitp(d)
         phases[i] = pitp(d)
     end
@@ -354,9 +414,10 @@ function lonlatmodel(hbfcn, nufcn, bfcn, gfcn, paths, datetime; pathstep=100e3)
         wvg = SegmentedWaveguide([lonlatsegment(wpts[i].lon, wpts[i].lat, wpts[i].dist,
             datetime, hbfcn, nufcn, bffcn, gfcn) for i in eachindex(wpts)])
 
-        gs = GroundSampler(range(tx, rx), Fields.Ez)
+        gs = GroundSampler(range(tx, rx), Fields.Hy)
         _, a, p = propagate(wvg, tx, gs)
-        amps[j] = a
+        # Hy is returned as Z₀H in dB µV/m; convert to B in dB pT for consistency with `model`
+        amps[j] = a + ZH_DBUVM_TO_B_DBPT
         phases[j] = p
     end
     return amps, phases
