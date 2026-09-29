@@ -722,7 +722,7 @@ function exterior_mask(varmap, threshold; connectivity=8)
 end
 
 """
-    krigingkeep(paths, projection, x_grid, y_grid; threshold, krig_dr=20e3,
+    krigingkeep(paths, projection, x_grid, y_grid, threshold; krig_dr=20e3,
                 connectivity=8, kwargs...)
 
 Return a `BitMatrix` of size `(length(y_grid), length(x_grid))` that is `false` at grid
@@ -763,6 +763,21 @@ function filterbounds!(localization, lonlat, west, east, south, north)
     end
     return localization
 end
+
+"""
+    filterbounds!(localization, keep::AbstractMatrix{Bool})
+
+Zero row `i` of `localization` wherever `keep[i]` is `false`. The linear indexing of
+`keep` must match the row ordering of `localization`, i.e. `densify(x_grid, y_grid)`.
+"""
+function filterbounds!(localization, keep::AbstractMatrix{Bool})
+    @assert length(keep) == size(localization, 1) "length(keep) ($(length(keep))) must equal size(localization, 1) ($(size(localization, 1)))"
+    for i in eachindex(keep)
+        keep[i] || (localization[i, :] .= 0)
+    end
+    return localization
+end
+
 """
     filterbounds!(localization, varmap, threshold)
 
@@ -786,29 +801,6 @@ A typical threshold for a unit-sill Gaussian variogram is `0.2^2 = 0.04`.
 
 See also: [`exterior_mask`](@ref), [`krigingmask`](@ref)
 """
-function filterbounds!(localization, varmap::AbstractMatrix, threshold::Real)
-    @assert length(varmap) == size(localization, 1) "length(varmap) ($(length(varmap))) must equal size(localization, 1) ($(size(localization, 1)))"
-    keep = exterior_mask(varmap, threshold)
-    for i in eachindex(keep)
-        keep[i] || (localization[i, :] .= 0)
-    end
-    return localization
-end
-
-"""
-    filterbounds!(localization, keep::AbstractMatrix{Bool})
-
-Zero row `i` of `localization` wherever `keep[i]` is `false`. The linear indexing of
-`keep` must match the row ordering of `localization`, i.e. `densify(x_grid, y_grid)`.
-"""
-function filterbounds!(localization, keep::AbstractMatrix{Bool})
-    @assert length(keep) == size(localization, 1) "length(keep) ($(length(keep))) must equal size(localization, 1) ($(size(localization, 1)))"
-    for i in eachindex(keep)
-        keep[i] || (localization[i, :] .= 0)
-    end
-    return localization
-end
-
 filterbounds!(localization, varmap::AbstractMatrix, threshold::Real) =
     filterbounds!(localization, exterior_mask(varmap, threshold))
 
