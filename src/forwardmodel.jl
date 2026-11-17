@@ -342,9 +342,8 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
     convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
 
    
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
-    #TODO: Dynamically set grpfparams tolerance based on hprimes, betas, and frequency to speed up LMP runs without sacrificing accuracy.
-
+    output = LMP.buildrun(batch; params=LMPParams(finderparams=FinderParams(tol=3e-5)))
+    
     amps = Vector{Float64}(undef, length(paths))
     phases = similar(amps)
 
@@ -396,7 +395,7 @@ function model(itp::ScatteredInterpolant, x, paths, datetime;
     # pT conversion applies only to magnetic components
     convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
    
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+    output = LMP.buildrun(batch; params=LMPParams(finderparams=FinderParams(tol=3e-5)))
     
 
     amps = Vector{Float64}(undef, length(paths))
@@ -454,7 +453,7 @@ function model(hbfcn::Function, paths, datetime;
     # pT conversion applies only to magnetic components
     convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
 
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+    output = LMP.buildrun(batch; params=LMPParams(finderparams=FinderParams(tol=3e-5)))
     
 
     amps = Vector{Float64}(undef, length(paths))
@@ -515,7 +514,7 @@ function model_observables(itp::GeoStatsInterpolant, x, paths, datetime;
             pathstep, fieldcomponent=Fields.H)
     end
 
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+    output = LMP.buildrun(batch; params=LMPParams(finderparams=FinderParams(tol=3e-5)))
 
     return _collect_observables(output, paths, datatypes; Hunits_pT)
 end
@@ -544,7 +543,7 @@ function model_observables(itp::ScatteredInterpolant, x, paths, datetime;
             pathstep, fieldcomponent=Fields.H)
     end
 
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+    output = LMP.buildrun(batch; params=LMPParams(finderparams=FinderParams(tol=3e-5)))
 
     return _collect_observables(output, paths, datatypes; Hunits_pT)
 end
@@ -566,7 +565,7 @@ function model_observables(hbfcn::Function, paths, datetime;
             pathstep, fieldcomponent=Fields.H)
     end
 
-    output = LMP.buildrun(batch; params=LMPParams(approxsusceptibility=true, grpfparams=GRPFParams(100000, 3e-5, true)))
+    output = LMP.buildrun(batch; params=LMPParams(finderparams=FinderParams(tol=3e-5)))
 
     return _collect_observables(output, paths, datatypes; Hunits_pT)
 end
