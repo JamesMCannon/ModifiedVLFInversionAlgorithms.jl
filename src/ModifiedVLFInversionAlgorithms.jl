@@ -24,6 +24,7 @@ export gaspari1999_410, lonlatgrid_dists, obs2grid_diamondpill, obs2grid_distanc
 export totalvariation, tikhonov_gradient, l2norm, objective, hubernorm, pseudohubernorm
 export phasediff, circular_phase_stats
 export fieldrange, stack_R, is_phase_field
+export SafeMesh, SAFEMESH, safebottom, lmpparams
 
 const RNG = MersenneTwister(1234)
 
@@ -38,6 +39,7 @@ const proj_lock = ReentrantLock()
 esri_102010() = "ESRI:102010"
 
 include("utils.jl")
+include("modesearch.jl")
 include("forwardmodel.jl")
 include("localization_grids.jl")
 
