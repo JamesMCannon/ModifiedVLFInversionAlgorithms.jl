@@ -25,7 +25,7 @@ export gaspari1999_410, lonlatgrid_dists, obs2grid_diamondpill, obs2grid_distanc
 export totalvariation, tikhonov_gradient, l2norm, objective, hubernorm, pseudohubernorm
 export phasediff, circular_phase_stats
 export fieldrange, stack_R, is_phase_field
-export SafeMesh, SAFEMESH, safebottom, lmpparams
+export SafeMesh, PolishedMesh, SAFEMESH, safebottom, lmpparams
 
 const RNG = MersenneTwister(1234)
 
