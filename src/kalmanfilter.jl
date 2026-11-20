@@ -913,31 +913,91 @@ function ensemble_model!(ym, f, x)
     return ym
 end
 
-function ensemble_model!(ym, f, x::NamedTuple)
-    @showprogress Threads.@threads for e in x.xy_state.ens
-        xy_state = x.xy_state(ens=e)
+"""
+    _member_state(x::NamedTuple, e)
 
-        # Construct the ensemble input dynamically
-        ens_state = NamedTuple()
-        ens_state = merge(ens_state, (; xy_state))
-        if haskey(x, :tx_pwrs)
-            tx_pwrs = x.tx_pwrs(ens=e)
-            ens_state = merge(ens_state, (; tx_pwrs))
+Forward-model input for member `e`: its `xy_state`, and its `tx_pwrs` when present.
+"""
+function _member_state(x::NamedTuple, e)
+    ens_state = (; xy_state = x.xy_state(ens=e))
+    if haskey(x, :tx_pwrs)
+        ens_state = merge(ens_state, (; tx_pwrs = x.tx_pwrs(ens=e)))
+    end
+    return ens_state
+end
+
+"""
+    _apply_rx_offsets!(ym, x::NamedTuple, e)
+
+Add member `e`'s receiver phase offsets, if `x` has them, to its Hy phase. The Bϕ trellis offset
+shifts the absolute Hy phase only; the ratio observables (:s2, :s3) are invariant to it.
+"""
+function _apply_rx_offsets!(ym, x::NamedTuple, e)
+    haskey(x, :rx_phi_offset) || return ym
+    if (:split_ens in dimnames(x.rx_phi_offset))
+        offsets = mode.(eachslice(x.rx_phi_offset(ens=e), dims=:path))
+        ym(field=:phase, ens=e) .+= offsets .* (π/2)
+    else
+        ym(field=:phase, ens=e) .+= x.rx_phi_offset(ens=e) .* (π/2) # paths in the same order as ym
+    end
+    return ym
+end
+
+"""
+    _member_block(x::NamedTuple, idx)
+
+Copy of the forward-model inputs of `x` (`xy_state`, and `tx_pwrs` when present) for the members
+at positions `idx`.
+"""
+function _member_block(x::NamedTuple, idx)
+    xb = (; xy_state = x.xy_state[ens=idx])
+    if haskey(x, :tx_pwrs)
+        xb = merge(xb, (; tx_pwrs = x.tx_pwrs[ens=idx]))
+    end
+    return xb
+end
+
+"""
+    _run_block(f, xb::NamedTuple) → Vector{Pair}
+
+Run `f` for every member of `xb` on this process's threads; return `member => result` pairs.
+"""
+function _run_block(f, xb::NamedTuple)
+    members = collect(xb.xy_state.ens)
+    out = Vector{Pair{eltype(members),Any}}(undef, length(members))
+    Threads.@threads for i in eachindex(members)
+        out[i] = members[i] => f(_member_state(xb, members[i]))
+    end
+    return out
+end
+
+"""
+    ensemble_model!(ym, f, x::NamedTuple; pids=nothing)
+
+Run the forward model `f` for each member of `x.xy_state.ens`, add receiver phase offsets if `x`
+has them, and wrap the circular fields of `ym` about their ensemble fits.
+
+With `pids` (worker process ids), the members are split into contiguous blocks, one per worker;
+each worker runs its block on its own threads and the results are written to `ym` here. A
+member's forward-model result does not depend on the split.
+"""
+function ensemble_model!(ym, f, x::NamedTuple; pids=nothing)
+    if pids === nothing
+        @showprogress Threads.@threads for e in x.xy_state.ens
+            _assign_member!(ym, f(_member_state(x, e)), e)
+            _apply_rx_offsets!(ym, x, e)
         end
-
-        # Evaluate model
-        _assign_member!(ym, f(ens_state), e)
-
-        # Apply receiver phase offsets if present. The Bϕ trellis offset shifts
-        # the absolute Hy phase only; the ratio observables (:s2, :s3) are
-        # invariant to it and receive no offset.
-        if haskey(x, :rx_phi_offset)
-            if (:split_ens in dimnames(x.rx_phi_offset))
-                offsets = mode.(eachslice(x.rx_phi_offset(ens=e), dims=:path))
-                ym(field=:phase, ens=e) .+= offsets .* (π/2)
-            else
-                ym(field=:phase, ens=e) .+= x.rx_phi_offset(ens=e) .* (π/2) #implicitly, all paths must be in the same order
-            end
+    else
+        n = length(x.xy_state.ens)
+        blocks = collect(Iterators.partition(1:n, cld(n, length(pids))))
+        results = Vector{Any}(undef, length(blocks))
+        @sync for (k, blk) in enumerate(blocks)
+            xb = _member_block(x, blk)
+            @async results[k] = remotecall_fetch(_run_block, pids[k], f, xb)
+        end
+        for r in results, (e, res) in r
+            _assign_member!(ym, res, e)
+            _apply_rx_offsets!(ym, x, e)
         end
     end
 

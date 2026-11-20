@@ -11,6 +11,7 @@ using LongwaveModePropagator
 const LMP = LongwaveModePropagator
 using ProgressMeter
 using Base.Threads
+using Distributed: remotecall_fetch
 
 using LMPTools
 
