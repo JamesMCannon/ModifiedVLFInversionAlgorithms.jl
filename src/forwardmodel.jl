@@ -236,8 +236,6 @@ function model_observation(itp::GeoStatsInterpolant, geox, tx, rx, datetime; pat
     problem = EstimationProblem(geox, pts, (:h, :b))
     solution = solve(problem, itp.method)
 
-    geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
-
     for i in 1:length(wpts)
         lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
         
@@ -271,8 +269,6 @@ function model_observation(itp::ScatteredInterpolant, hitp, bitp, tx, rx, dateti
     end
     pts = PointSet(trans.(getindex.(mids, :lon), getindex.(mids, :lat)))
 
-    geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
-
     for i in 1:length(wpts)
         lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
         
@@ -302,8 +298,6 @@ This uses the [`igrf`](@ref) magnetic field and ground code from LMPTools.jl.
 """
 function model_observation(hbfcn, tx, rx, datetime; pathstep=100e3, fieldcomponent=Fields.H)
     input, wpts, mids = _model_observation(tx, rx; pathstep, fieldcomponent)
-
-    geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
 
     for i in 1:length(wpts)
         lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
