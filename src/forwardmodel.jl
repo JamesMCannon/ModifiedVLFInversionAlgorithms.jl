@@ -39,6 +39,13 @@ function segmentmids(line, wpts)
     return mids
 end
 
+"""
+    bearing(pt) → az
+
+Forward azimuth (°) of the geodesic at `pt`, a point returned by `forward` or `waypoints`.
+"""
+bearing(pt) = mod(pt.baz, 360) - 180
+
 # dB offset converting a Z₀H amplitude referenced to 1 µV/m into a B amplitude
 # referenced to 1 pT:  B [pT] = Z₀H [V/m] / c₀ × 1e12 = Z₀H [µV/m] × 1e6/c₀
 const ZH_DBUVM_TO_B_DBPT = 20log10(1e6 / LMP.C0)  # ≈ -49.5364 dB
@@ -234,7 +241,7 @@ function model_observation(itp::GeoStatsInterpolant, geox, tx, rx, datetime; pat
     for i in 1:length(wpts)
         lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
         
-        bfield = igrf(geoaz, lat, lon, year(datetime))
+        bfield = igrf(bearing(mids[i]), lat, lon, year(datetime))
         ground = GROUND[LMPTools.get_groundcode(lat, lon)]
 
         input.segment_ranges[i] = dist
@@ -269,7 +276,7 @@ function model_observation(itp::ScatteredInterpolant, hitp, bitp, tx, rx, dateti
     for i in 1:length(wpts)
         lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
         
-        bfield = igrf(geoaz, lat, lon, year(datetime))
+        bfield = igrf(bearing(mids[i]), lat, lon, year(datetime))
         ground = GROUND[LMPTools.get_groundcode(lat, lon)]
 
         input.segment_ranges[i] = dist
@@ -301,7 +308,7 @@ function model_observation(hbfcn, tx, rx, datetime; pathstep=100e3, fieldcompone
     for i in 1:length(wpts)
         lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
         
-        bfield = igrf(geoaz, lat, lon, year(datetime))
+        bfield = igrf(bearing(mids[i]), lat, lon, year(datetime))
         ground = GROUND[LMPTools.get_groundcode(lat, lon)]
 
         h, b = hbfcn(lon, lat, datetime)
@@ -607,7 +614,7 @@ frequency.
 
 - `hbfcn(lon, lat, datetime) → h′, β`
 - `nufcn(z, lon, lat) → ν`
-- `bfcn(geoaz, lon, lat, datetime) → BField`
+- `bfcn(az, lon, lat, datetime) → BField`, with `az` the local propagation azimuth (°)
 - `gfcn(lon, lat) → Ground`
 """
 function lonlatmodel(hbfcn, nufcn, bfcn, gfcn, paths, datetime; pathstep=100e3)
@@ -618,11 +625,8 @@ function lonlatmodel(hbfcn, nufcn, bfcn, gfcn, paths, datetime; pathstep=100e3)
         line, wpts = pathpts(tx, rx; dist=pathstep)
         mids = segmentmids(line, wpts)
 
-        geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
-
-        bffcn(lon, lat, dt) = bfcn(geoaz, lon, lat, dt)
-        wvg = SegmentedWaveguide([lonlatsegment(mids[i].lon, mids[i].lat, wpts[i].dist,
-            datetime, hbfcn, nufcn, bffcn, gfcn) for i in eachindex(wpts)])
+        wvg = SegmentedWaveguide([lonlatsegment(mids[i].lon, mids[i].lat, wpts[i].dist, datetime,
+            hbfcn, nufcn, (lo, la, dt) -> bfcn(bearing(mids[i]), lo, la, dt), gfcn) for i in eachindex(wpts)])
 
         gs = GroundSampler(range(tx, rx), Fields.Hy)
         _, a, p = propagate(wvg, tx, gs)
