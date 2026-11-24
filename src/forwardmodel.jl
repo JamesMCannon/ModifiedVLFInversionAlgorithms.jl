@@ -23,6 +23,21 @@ function pathpts(tx, rx; dist=100e3)
     return line, wpts
 end
 
+"""
+    segmentmids(line, wpts) → mids
+
+Points along `line` midway between each waypoint in `wpts` and the next; the last segment
+ends at the end of `line`.
+"""
+function segmentmids(line, wpts)
+    mids = similar(wpts)
+    for i in eachindex(wpts)
+        stop = i < lastindex(wpts) ? wpts[i+1].dist : line.s13
+        mids[i] = forward(line, (wpts[i].dist + stop)/2)
+    end
+    return mids
+end
+
 # dB offset converting a Z₀H amplitude referenced to 1 µV/m into a B amplitude
 # referenced to 1 pT:  B [pT] = Z₀H [V/m] / c₀ × 1e12 = Z₀H [µV/m] × 1e6/c₀
 const ZH_DBUVM_TO_B_DBPT = 20log10(1e6 / LMP.C0)  # ≈ -49.5364 dB
@@ -159,15 +174,16 @@ function _collect_observables(output, paths, datatypes; Hunits_pT=true)
 end
 
 """
-    _model_observation(tx, rx; pathstep=100e3) → (input, wpts)
+    _model_observation(tx, rx; pathstep=100e3) → (input, wpts, mids)
 
-Construct the baseline mutable `ExponentialInput` `input` and waypoints `wpts` with
-transmitter `tx` and receiver `rx`.
+Construct the baseline mutable `ExponentialInput` `input`, the segment-start waypoints
+`wpts` and the segment midpoints `mids` with transmitter `tx` and receiver `rx`.
 
 The rest of the `input` should be filled in using [`model_observation`](@ref).
 """
 function _model_observation(tx, rx; pathstep=100e3, fieldcomponent=Fields.H)
-    _, wpts = pathpts(tx, rx; dist=pathstep)
+    line, wpts = pathpts(tx, rx; dist=pathstep)
+    mids = segmentmids(line, wpts)
 
     # Build the ExponentialInput
     input = ExponentialInput()
@@ -189,7 +205,7 @@ function _model_observation(tx, rx; pathstep=100e3, fieldcomponent=Fields.H)
     # NOTE: if changing `output_ranges` step, must also update in `model`!
     input.output_ranges = collect(0:5e3:round(range(tx, rx)+10e3, digits=-4, RoundUp))
     
-    return input, wpts
+    return input, wpts, mids
 end
 
 """
@@ -201,13 +217,13 @@ function model_observation(itp::GeoStatsInterpolant, geox, tx, rx, datetime; pat
     :h in itp.method.varnames && :b in itp.method.varnames ||
         @warn "`:h` and `:b` should be defined in `itp.method`"
 
-    input, wpts = _model_observation(tx, rx; pathstep, fieldcomponent)
+    input, wpts, mids = _model_observation(tx, rx; pathstep, fieldcomponent)
 
-    # Projected wpts
+    # Projected segment midpoints
     trans = lock(proj_lock) do 
         Proj.Transformation(wgs84(), itp.projection)
     end
-    pts = PointSet(trans.(getindex.(wpts, :lon), getindex.(wpts, :lat)))
+    pts = PointSet(trans.(getindex.(mids, :lon), getindex.(mids, :lat)))
 
     problem = EstimationProblem(geox, pts, (:h, :b))
     solution = solve(problem, itp.method)
@@ -215,7 +231,7 @@ function model_observation(itp::GeoStatsInterpolant, geox, tx, rx, datetime; pat
     geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
 
     for i in 1:length(wpts)
-        lat, lon, dist = wpts[i].lat, wpts[i].lon, wpts[i].dist
+        lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
         
         bfield = igrf(geoaz, lat, lon, year(datetime))
         ground = GROUND[LMPTools.get_groundcode(lat, lon)]
@@ -239,18 +255,18 @@ end
 Build the `ExponentialInput` for a single path from `tx` to `rx` at `datetime`.
 """
 function model_observation(itp::ScatteredInterpolant, hitp, bitp, tx, rx, datetime; pathstep=100e3, fieldcomponent=Fields.H)
-    input, wpts = _model_observation(tx, rx; pathstep, fieldcomponent)
+    input, wpts, mids = _model_observation(tx, rx; pathstep, fieldcomponent)
 
-    # Projected wpts
+    # Projected segment midpoints
     trans = lock(proj_lock) do 
         Proj.Transformation(wgs84(), itp.projection)
     end
-    pts = PointSet(trans.(getindex.(wpts, :lon), getindex.(wpts, :lat)))
+    pts = PointSet(trans.(getindex.(mids, :lon), getindex.(mids, :lat)))
 
     geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
 
     for i in 1:length(wpts)
-        lat, lon, dist = wpts[i].lat, wpts[i].lon, wpts[i].dist
+        lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
         
         bfield = igrf(geoaz, lat, lon, year(datetime))
         ground = GROUND[LMPTools.get_groundcode(lat, lon)]
@@ -277,12 +293,12 @@ Build the `ExponentialInput` using `hbfcn`, a function of `(lon, lat, datetime)`
 This uses the [`igrf`](@ref) magnetic field and ground code from LMPTools.jl.
 """
 function model_observation(hbfcn, tx, rx, datetime; pathstep=100e3, fieldcomponent=Fields.H)
-    input, wpts = _model_observation(tx, rx; pathstep, fieldcomponent)
+    input, wpts, mids = _model_observation(tx, rx; pathstep, fieldcomponent)
 
     geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
 
     for i in 1:length(wpts)
-        lat, lon, dist = wpts[i].lat, wpts[i].lon, wpts[i].dist
+        lat, lon, dist = mids[i].lat, mids[i].lon, wpts[i].dist
         
         bfield = igrf(geoaz, lat, lon, year(datetime))
         ground = GROUND[LMPTools.get_groundcode(lat, lon)]
@@ -598,12 +614,13 @@ function lonlatmodel(hbfcn, nufcn, bfcn, gfcn, paths, datetime; pathstep=100e3)
     phases = similar(amps)
     for j in eachindex(paths)
         tx, rx = paths[j]
-        _, wpts = pathpts(tx, rx; dist=pathstep)
+        line, wpts = pathpts(tx, rx; dist=pathstep)
+        mids = segmentmids(line, wpts)
 
         geoaz = inverse(tx.longitude, tx.latitude, rx.longitude, rx.latitude).azi
 
         bffcn(lon, lat, dt) = bfcn(geoaz, lon, lat, dt)
-        wvg = SegmentedWaveguide([lonlatsegment(wpts[i].lon, wpts[i].lat, wpts[i].dist,
+        wvg = SegmentedWaveguide([lonlatsegment(mids[i].lon, mids[i].lat, wpts[i].dist,
             datetime, hbfcn, nufcn, bffcn, gfcn) for i in eachindex(wpts)])
 
         gs = GroundSampler(range(tx, rx), Fields.Hy)
