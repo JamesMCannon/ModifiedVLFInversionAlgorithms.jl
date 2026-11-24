@@ -13,12 +13,13 @@ end
 """
     pathpts(tx, rx; dist=100e3) → (line, wpts)
 
-Return a `GeodesicLine` and waypoints `wpts` from `tx` to `rx` of path tuple `p`
-with waypoints every `dist` meters along the path.
+Return a `GeodesicLine` and waypoints `wpts` at the starts of `max(1, floor(d/dist))`
+equal-length segments from `tx` to `rx`.
 """
 function pathpts(tx, rx; dist=100e3)
     line = GeodesicLine(tx, rx)
-    wpts = waypoints(line; dist=dist)[1:end-1]
+    n = max(1, floor(Int, line.s13/dist))
+    wpts = waypoints(line; n=n+1)[1:end-1]
 
     return line, wpts
 end
@@ -441,7 +442,7 @@ model(itp::ScatteredInterpolant, x::KeyedArray, paths, datetime; kwargs...) =
 Use `hbfcn`, a function of `(lon, lat, datetime)`, to compute `(h′, β)` along each 
 vector of (transmitter, receiver) `paths`.
 
-`pathstep` is the segment length in meters along each path.
+Each path is split into `max(1, floor(d/pathstep))` equal-length segments.
 
 LongwaveModePropagator is used as the forward model. 
 
