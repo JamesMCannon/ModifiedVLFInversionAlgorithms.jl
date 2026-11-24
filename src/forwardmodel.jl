@@ -338,7 +338,7 @@ and the second half is ``β``.
 Uses LongwaveModePropagator.jl as the forward model.
 """
 function model(itp::GeoStatsInterpolant, x, paths, datetime;
-    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true, mesh=SAFEMESH, params=lmpparams())
+    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true, mesh=AVIDMESH)
 
     npts = length(x) ÷ 2
     hprimes = x[1:npts]
@@ -366,7 +366,7 @@ function model(itp::GeoStatsInterpolant, x, paths, datetime;
     convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
 
    
-    output = LMP.buildrun(batch; mesh, params)
+    output = avidrun(batch; mesh)
     
     amps = Vector{Float64}(undef, length(paths))
     phases = similar(amps)
@@ -391,7 +391,7 @@ model(itp::GeoStatsInterpolant, x::KeyedArray, paths, datetime; kwargs...) =
     model(itp, [filter(!isnan, x(:h)); filter(!isnan, x(:b))], paths, datetime; kwargs...)
 
 function model(itp::ScatteredInterpolant, x, paths, datetime;
-    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true, mesh=SAFEMESH, params=lmpparams())
+    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true, mesh=AVIDMESH)
 
     npts = length(x) ÷ 2
     hprimes = x[1:npts]
@@ -419,7 +419,7 @@ function model(itp::ScatteredInterpolant, x, paths, datetime;
     # pT conversion applies only to magnetic components
     convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
    
-    output = LMP.buildrun(batch; mesh, params)
+    output = avidrun(batch; mesh)
     
 
     amps = Vector{Float64}(undef, length(paths))
@@ -456,7 +456,7 @@ LongwaveModePropagator is used as the forward model.
 See also: [`model_observation`](@ref)
 """
 function model(hbfcn::Function, paths, datetime;
-    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true, mesh=SAFEMESH, params=lmpparams())
+    pathstep=100e3, fieldcomponent=Fields.H, obscomponent=Fields.Hy, Hunits_pT=true, mesh=AVIDMESH)
 
     batch = BatchInput{ExponentialInput}()
     batch.name = "estimate"
@@ -477,7 +477,7 @@ function model(hbfcn::Function, paths, datetime;
     # pT conversion applies only to magnetic components
     convert_pT = Hunits_pT && obscomponent in H_COMPONENTS
 
-    output = LMP.buildrun(batch; mesh, params)
+    output = avidrun(batch; mesh)
 
     amps = Vector{Float64}(undef, length(paths))
     phases = similar(amps)
@@ -517,7 +517,7 @@ If `x` is a `KeyedArray`, it is transformed to a vector where the first half is
 ``h′`` and the second half is ``β``, matching [`model`](@ref).
 """
 function model_observables(itp::GeoStatsInterpolant, x, paths, datetime;
-    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true,  mesh=SAFEMESH, params=lmpparams())
+    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true, mesh=AVIDMESH)
 
     npts = length(x) ÷ 2
     hprimes = x[1:npts]
@@ -537,7 +537,7 @@ function model_observables(itp::GeoStatsInterpolant, x, paths, datetime;
             pathstep, fieldcomponent=Fields.H)
     end
 
-    output = LMP.buildrun(batch; mesh, params)
+    output = avidrun(batch; mesh)
 
     return _collect_observables(output, paths, datatypes; Hunits_pT)
 end
@@ -545,7 +545,7 @@ model_observables(itp::GeoStatsInterpolant, x::KeyedArray, paths, datetime; kwar
     model_observables(itp, [filter(!isnan, x(:h)); filter(!isnan, x(:b))], paths, datetime; kwargs...)
 
 function model_observables(itp::ScatteredInterpolant, x, paths, datetime;
-    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true, mesh=SAFEMESH, params=lmpparams())
+    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true, mesh=AVIDMESH)
 
     npts = length(x) ÷ 2
     hprimes = x[1:npts]
@@ -566,7 +566,7 @@ function model_observables(itp::ScatteredInterpolant, x, paths, datetime;
             pathstep, fieldcomponent=Fields.H)
     end
 
-    output = LMP.buildrun(batch; mesh, params)
+    output = avidrun(batch; mesh)
 
     return _collect_observables(output, paths, datatypes; Hunits_pT)
 end
@@ -574,7 +574,7 @@ model_observables(itp::ScatteredInterpolant, x::KeyedArray, paths, datetime; kwa
     model_observables(itp, [vec(x(:h)); vec(x(:b))], paths, datetime; kwargs...)
 
 function model_observables(hbfcn::Function, paths, datetime;
-    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true, mesh=SAFEMESH, params=lmpparams())
+    pathstep=100e3, datatypes=(:amp, :phase), Hunits_pT=true, mesh=AVIDMESH)
 
     batch = BatchInput{ExponentialInput}()
     batch.name = "estimate"
@@ -588,7 +588,7 @@ function model_observables(hbfcn::Function, paths, datetime;
             pathstep, fieldcomponent=Fields.H)
     end
 
-    output = LMP.buildrun(batch; mesh, params)
+    output = avidrun(batch; mesh)
 
     return _collect_observables(output, paths, datatypes; Hunits_pT)
 end

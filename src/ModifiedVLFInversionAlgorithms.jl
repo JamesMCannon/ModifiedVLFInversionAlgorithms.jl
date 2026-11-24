@@ -12,6 +12,7 @@ const LMP = LongwaveModePropagator
 using ProgressMeter
 using Base.Threads
 using Distributed: remotecall_fetch
+using Logging: with_logger, NullLogger
 
 using LMPTools
 
@@ -26,6 +27,7 @@ export totalvariation, tikhonov_gradient, l2norm, objective, hubernorm, pseudohu
 export phasediff, circular_phase_stats
 export fieldrange, stack_R, is_phase_field
 export SafeMesh, PolishedMesh, SAFEMESH, safebottom, lmpparams
+export SearchRegion, TiledMesh, avidregions, avidmesh, AVIDMESH, avidrun, waittopheight, pathparams
 
 const RNG = MersenneTwister(1234)
 
